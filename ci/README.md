@@ -46,15 +46,16 @@ Component repos (e.g., `rosa-regional-platform-api`) can run the e2e test suite 
 
 The CI image is built from [ci/Containerfile](ci/Containerfile) and includes all required tools:
 
-| Tool      | Purpose                                       |
-| --------- | --------------------------------------------- |
-| Terraform | Infrastructure provisioning                   |
-| Helm      | Kubernetes chart templating and linting       |
-| AWS CLI   | AWS account and resource management           |
-| Python/uv | Ephemeral provider and scripting              |
-| Prettier  | Markdown formatting checks (`check-docs` job) |
-| yq        | YAML processing                               |
-| promtool  | Prometheus rule validation and unit testing   |
+| Tool      | Purpose                                        |
+| --------- | ---------------------------------------------- |
+| Terraform | Infrastructure provisioning                    |
+| Helm      | Kubernetes chart templating and linting        |
+| AWS CLI   | AWS account and resource management            |
+| Python/uv | Ephemeral provider and scripting               |
+| Prettier  | Markdown formatting checks (`check-docs` job)  |
+| yq        | YAML processing                                |
+| promtool  | Prometheus rule validation and unit testing    |
+| leaktk    | Secret leak scanning in collected cluster logs |
 
 These tools are available in all CI job containers and can be used in scripts run by CI jobs.
 

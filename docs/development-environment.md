@@ -343,5 +343,4 @@ make ephemeral-teardown ID=6bd2d3d7
 
 ## Further Reading
 
-- [Milestone 2 slides](presentations/milestone-2/slides.md) -- ephemeral provider architecture and how environments are provisioned/torn down
 - [ci/ephemeral-provider/README.md](../ci/ephemeral-provider/README.md) -- ephemeral provider internals
