@@ -86,7 +86,7 @@ Create a new region config file at `config/<environment>/<region>.yaml`. This in
 
 ```yaml
 # config/my-env/us-east-1.yaml
-management_clusters:
+provision_mcs:
   mc01: {}
 ```
 
@@ -96,7 +96,7 @@ To enable the bastion:
 # config/my-env/us-east-1.yaml
 terraform_vars:
   enable_bastion: true
-management_clusters:
+provision_mcs:
   mc01: {}
 ```
 

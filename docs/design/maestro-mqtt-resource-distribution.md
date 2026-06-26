@@ -989,8 +989,8 @@ This network topology demonstrates the fundamental isolation principle: Regional
 
 ### Configuration Files
 
-- **[argocd/config/regional-cluster/maestro/](../../argocd/config/regional-cluster/maestro/)** - Maestro Server Helm chart configurations
-- **[argocd/config/management-cluster/maestro/](../../argocd/config/management-cluster/maestro/)** - Maestro Agent Helm chart configurations
+- **[argocd/config/regional-cluster/maestro-server/](../../argocd/config/regional-cluster/maestro-server/)** - Maestro Server Helm chart configurations
+- **[argocd/config/management-cluster/maestro-agent/](../../argocd/config/management-cluster/maestro-agent/)** - Maestro Agent Helm chart configurations
 
 ---
 

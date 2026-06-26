@@ -177,6 +177,6 @@ Platform alerting and recording rules are defined as PrometheusRule CRs in the `
 ### Important Files and Patterns
 
 - `Makefile` - Standardized provisioning commands
-- `bootstrap-argocd.sh` - ECS Fargate bootstrap script
+- `scripts/bootstrap-argocd.sh` - ECS Fargate bootstrap script
 - `argocd/config/shared/argocd/` - ArgoCD self-management Helm chart
 - Design decisions follow ADR format in `docs/design/`

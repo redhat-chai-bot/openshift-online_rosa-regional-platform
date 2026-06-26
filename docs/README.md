@@ -39,16 +39,22 @@ Detailed architecture and rationale for key technical decisions:
 | [ZOA Architecture](design/zoa-architecture.md)                                     | Zero Operator Access — system components, flows, infrastructure    |
 | [ZOA Trusted Actions](design/zoa-trusted-actions.md)                               | TA template format, API design, CLI, dispatch flow                 |
 | [ZOA Security Model](design/zoa-security-model.md)                                 | SA isolation, RBAC, audit trail, threat model, FIPS                |
+| [Alerting Architecture](design/alerting-architecture.md)                           | Platform alerting pipeline and rule evaluation                     |
+| [AWS IAM Hosted Cluster Auth](design/aws-iam-hosted-cluster-authentication.md)     | IAM-based authentication for hosted cluster access                 |
+| [Regional OIDC Ownership](design/regional-oidc-ownership.md)                       | OIDC provider ownership model for regional clusters                |
+| [Spec-to-PR Agent](design/spec-to-pr-agent.md)                                     | Automated specification-to-pull-request agent design               |
 
 ### How-To Guides
 
-| Document                                                             | Topic                                        |
-| -------------------------------------------------------------------- | -------------------------------------------- |
-| [Provision a New Environment](environment-provisioning.md)           | Pipeline-based environment provisioning      |
-| [Provisioning a Development Environment](development-environment.md) | Ephemeral dev environments                   |
-| [Provision a Hosted Cluster](hostedcluster-provisioning.md)          | Create and access a ROSA HCP cluster         |
-| [Hosted Cluster Teardown](hostedcluster-teardown.md)                 | Admin-only manual teardown and force cleanup |
-| [Adding Alerting Rules](adding-alerting-rules.md)                    | Platform alerting and recording rules        |
+| Document                                                             | Topic                                         |
+| -------------------------------------------------------------------- | --------------------------------------------- |
+| [Provision a New Environment](environment-provisioning.md)           | Pipeline-based environment provisioning       |
+| [Provisioning a Development Environment](development-environment.md) | Ephemeral dev environments                    |
+| [Provision a Hosted Cluster](hostedcluster-provisioning.md)          | Create and access a ROSA HCP cluster          |
+| [Hosted Cluster Teardown](hostedcluster-teardown.md)                 | Admin-only manual teardown and force cleanup  |
+| [Adding Alerting Rules](adding-alerting-rules.md)                    | Platform alerting and recording rules         |
+| [Adding Component Pre-Merge](adding-component-pre-merge.md)          | Pre-merge testing for new platform components |
+| [Incident Commander Guide](process/ic.md)                            | IC responsibilities and on-call procedures    |
 
 ### Reference
 
@@ -58,6 +64,8 @@ Detailed architecture and rationale for key technical decisions:
 | [ArgoCD Configuration](../argocd/README.md)               | ArgoCD setup, config modes, adding charts |
 | [CI](../ci/README.md)                                     | E2E testing, ephemeral environments       |
 | [Terraform Configurations](../terraform/config/README.md) | Pipeline architecture and cluster configs |
+| [Break-Glass Access](sop/break-glass/README.md)           | Emergency break-glass access procedures   |
+| [Rebuild Integration](sop/rebuild-integration.md)         | Integration environment rebuild SOP       |
 
 ### Terraform Module Documentation
 
@@ -72,6 +80,8 @@ Each module has its own README with usage, inputs, outputs, and architecture:
 - [`maestro-agent`](../terraform/modules/maestro-agent/README.md) - IAM and Pod Identity for Maestro Agent
 - [`grafana-cloudwatch-logs`](../terraform/modules/grafana-cloudwatch-logs/) - IAM + Pod Identity for Grafana CloudWatch Logs datasources (RC primary + MC reader)
 - [`hyperfleet-infrastructure`](../terraform/modules/hyperfleet-infrastructure/README.md) - RDS, Amazon MQ, IAM for HyperFleet (CLM)
+- [`pipeline-notifications`](../terraform/modules/pipeline-notifications/README.md) - SNS/Lambda pipeline notification infrastructure
+- [`rhobs-api-gateway`](../terraform/modules/rhobs-api-gateway/README.md) - RHOBS API Gateway for MC metrics remote write
 
 ### ArgoCD Helm Chart Documentation
 
@@ -81,13 +91,6 @@ Each module has its own README with usage, inputs, outputs, and architecture:
 - [`platform-api`](../argocd/config/regional-cluster/platform-api/README.md) - Platform API with Envoy sidecar
 - [`thanos`](../argocd/config/regional-cluster/thanos/) - Thanos platform resources (CRs, S3 secret, Pod Identity SA, ALB TargetGroupBinding) plus app-of-apps Application that installs the upstream operator
 - [`thanos-operator`](../argocd/config/regional-cluster/thanos-operator/) - Thin wrapper chart that delivers the Thanos operator via OCI-packaged Helm subchart
-
-### Presentations
-
-Slidev-based presentations for project overview and milestones:
-
-- [Project Overview](presentations/project/README.md) - ROSA Regional Platform project presentation
-- [Milestone 1](presentations/milestone-1/README.md) - Full region provisioning demonstration
 
 ## Scope
 
