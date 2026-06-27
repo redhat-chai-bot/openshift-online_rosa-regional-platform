@@ -22,6 +22,8 @@ Detailed architecture and rationale for key technical decisions:
 
 | Document                                                                           | Topic                                                              |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Alerting Architecture](design/alerting-architecture.md)                           | Fan-out alert routing from AlertManager to multiple receivers      |
+| [AWS IAM HCP Authentication](design/aws-iam-hosted-cluster-authentication.md)      | IAM-based authentication for hosted cluster access (experimental)  |
 | [DNS Architecture](design/dns-architecture.md)                                     | Hierarchical DNS with zone shards, `deployment_name`, DNSSEC chain |
 | [ECS Fargate Bootstrap](design/fully-private-eks-bootstrap.md)                     | How fully private EKS clusters are bootstrapped via ECS            |
 | [FIPS-Only EKS Compute](design/fips-eks-compute.md)                                | FIPS NodeClass/NodePool strategy for FedRAMP workload nodes        |
@@ -32,7 +34,10 @@ Detailed architecture and rationale for key technical decisions:
 | [MC Metrics Remote Write](design/mc-metrics-remote-write.md)                       | MC-to-RC metrics forwarding via RHOBS API Gateway                  |
 | [Monitoring Platform](design/monitoring-platform.md)                               | Metrics pipeline (Prometheus + Thanos)                             |
 | [Pipeline-Based Lifecycle](design/pipeline-based-lifecycle.md)                     | CodePipeline hierarchy for cluster provisioning                    |
+| [Rate Limiting Architecture](design/rate-limiting-architecture.md)                 | Platform API rate limiting — WAF vs API Gateway vs in-app          |
 | [Regional Account Minting](design/regional-account-minting.md)                     | AWS account structure and minting pipelines                        |
+| [Regional OIDC Ownership](design/regional-oidc-ownership.md)                       | OIDC issuer ownership model for HyperShift-hosted clusters         |
+| [Spec-to-PR Agent](design/spec-to-pr-agent.md)                                     | Automated agent workflow from design spec to pull request          |
 | [Terraform Resource Adoption](design/terraform-resource-adoption.md)               | Idempotent import of auto-created AWS resources into Terraform     |
 | [Testing Strategy](design/testing-strategy.md)                                     | Ephemeral and long-lived test environments                         |
 | [Thanos Metrics Infrastructure](design/thanos-metrics-infrastructure.md)           | Thanos S3 storage, operator, and Pod Identity setup                |
@@ -49,6 +54,7 @@ Detailed architecture and rationale for key technical decisions:
 | [Provision a Hosted Cluster](hostedcluster-provisioning.md)          | Create and access a ROSA HCP cluster         |
 | [Hosted Cluster Teardown](hostedcluster-teardown.md)                 | Admin-only manual teardown and force cleanup |
 | [Adding Alerting Rules](adding-alerting-rules.md)                    | Platform alerting and recording rules        |
+| [Cross-Component E2E Testing](adding-component-pre-merge.md)         | Run platform e2e tests against component PRs |
 
 ### Reference
 
@@ -72,6 +78,8 @@ Each module has its own README with usage, inputs, outputs, and architecture:
 - [`maestro-agent`](../terraform/modules/maestro-agent/README.md) - IAM and Pod Identity for Maestro Agent
 - [`grafana-cloudwatch-logs`](../terraform/modules/grafana-cloudwatch-logs/) - IAM + Pod Identity for Grafana CloudWatch Logs datasources (RC primary + MC reader)
 - [`hyperfleet-infrastructure`](../terraform/modules/hyperfleet-infrastructure/README.md) - RDS, Amazon MQ, IAM for HyperFleet (CLM)
+- [`pipeline-notifications`](../terraform/modules/pipeline-notifications/README.md) - Slack notifications for CodePipeline failures via EventBridge and Lambda
+- [`rhobs-api-gateway`](../terraform/modules/rhobs-api-gateway/README.md) - Dedicated REST API Gateway for RHOBS observability traffic
 
 ### ArgoCD Helm Chart Documentation
 
@@ -81,13 +89,7 @@ Each module has its own README with usage, inputs, outputs, and architecture:
 - [`platform-api`](../argocd/config/regional-cluster/platform-api/README.md) - Platform API with Envoy sidecar
 - [`thanos`](../argocd/config/regional-cluster/thanos/) - Thanos platform resources (CRs, S3 secret, Pod Identity SA, ALB TargetGroupBinding) plus app-of-apps Application that installs the upstream operator
 - [`thanos-operator`](../argocd/config/regional-cluster/thanos-operator/) - Thin wrapper chart that delivers the Thanos operator via OCI-packaged Helm subchart
-
-### Presentations
-
-Slidev-based presentations for project overview and milestones:
-
-- [Project Overview](presentations/project/README.md) - ROSA Regional Platform project presentation
-- [Milestone 1](presentations/milestone-1/README.md) - Full region provisioning demonstration
+- [`zoa-jobs`](../argocd/config/shared/zoa-jobs/) - ZOA job infrastructure (service accounts, namespace) for Trusted Action execution
 
 ## Scope
 

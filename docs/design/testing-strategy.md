@@ -20,6 +20,13 @@ The Testing Suite is a reusable component shared by all CI flows. It:
 - Uses the Platform API to CRUD Hosted Control Planes
 - Runs workloads inside those HCPs to validate the customer experience
 
+The CI runner (`ci/e2e-tests.sh`) executes four test suites in sequence:
+
+1. **Platform API** (`make test-e2e-api`) — core API CRUD operations
+2. **ZOA Trusted Actions** (`make test-e2e-zoa`) — Zero Operator Access execution and audit; skipped if platform tests fail
+3. **HCP lifecycle** (`make test-e2e-cli`) — full cluster create/monitor/teardown via `rosactl`
+4. **Platform monitoring** (`make test-e2e-platform-monitoring`) — alerting and metrics validation
+
 ## Load Testing
 
 The nightly pipeline includes k6-based load tests that stress the Platform API under realistic traffic patterns. Load tests run after functional e2e tests pass, against the same provisioned environment.
