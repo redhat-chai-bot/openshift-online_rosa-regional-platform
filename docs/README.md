@@ -22,6 +22,8 @@ Detailed architecture and rationale for key technical decisions:
 
 | Document                                                                           | Topic                                                              |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Alerting Architecture](design/alerting-architecture.md)                           | Fan-out alert routing (AlertManager receivers)                     |
+| [AWS IAM Hosted Cluster Auth](design/aws-iam-hosted-cluster-authentication.md)     | AWS IAM auth for hosted clusters (experimental)                    |
 | [DNS Architecture](design/dns-architecture.md)                                     | Hierarchical DNS with zone shards, `deployment_name`, DNSSEC chain |
 | [ECS Fargate Bootstrap](design/fully-private-eks-bootstrap.md)                     | How fully private EKS clusters are bootstrapped via ECS            |
 | [FIPS-Only EKS Compute](design/fips-eks-compute.md)                                | FIPS NodeClass/NodePool strategy for FedRAMP workload nodes        |
@@ -32,7 +34,10 @@ Detailed architecture and rationale for key technical decisions:
 | [MC Metrics Remote Write](design/mc-metrics-remote-write.md)                       | MC-to-RC metrics forwarding via RHOBS API Gateway                  |
 | [Monitoring Platform](design/monitoring-platform.md)                               | Metrics pipeline (Prometheus + Thanos)                             |
 | [Pipeline-Based Lifecycle](design/pipeline-based-lifecycle.md)                     | CodePipeline hierarchy for cluster provisioning                    |
+| [Rate Limiting Architecture](design/rate-limiting-architecture.md)                 | Platform API rate limiting (in-app + Redis)                        |
 | [Regional Account Minting](design/regional-account-minting.md)                     | AWS account structure and minting pipelines                        |
+| [Regional OIDC Ownership](design/regional-oidc-ownership.md)                       | Regional OIDC provider ownership for HyperShift                    |
+| [Spec-to-PR Agent](design/spec-to-pr-agent.md)                                     | Spec-to-PR agent workflow                                          |
 | [Terraform Resource Adoption](design/terraform-resource-adoption.md)               | Idempotent import of auto-created AWS resources into Terraform     |
 | [Testing Strategy](design/testing-strategy.md)                                     | Ephemeral and long-lived test environments                         |
 | [Thanos Metrics Infrastructure](design/thanos-metrics-infrastructure.md)           | Thanos S3 storage, operator, and Pod Identity setup                |
