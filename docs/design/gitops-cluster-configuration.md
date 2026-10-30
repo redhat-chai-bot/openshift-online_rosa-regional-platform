@@ -4,11 +4,11 @@
 
 ## Summary
 
-The ROSA Regional Platform implements a sophisticated GitOps cluster configuration system using ArgoCD ApplicationSets with matrix generators that enables scalable, versioned, and region-aware deployment of applications across multiple clusters while maintaining regional independence and progressive deployment capabilities.
+The ROSA Seaplane implements a sophisticated GitOps cluster configuration system using ArgoCD ApplicationSets with matrix generators that enables scalable, versioned, and region-aware deployment of applications across multiple clusters while maintaining regional independence and progressive deployment capabilities.
 
 ## Context
 
-The ROSA Regional Platform is architected from the ground up as a regionally-distributed system where each cluster (Regional Clusters and Management Clusters) operates independently with its own ArgoCD instance for self-configuration. Within each region (containing 1 Regional Cluster + 1 to N Management Clusters), the configuration management system must support this cluster independence while sharing common application definitions and enabling coordinated deployments across environments.
+The ROSA Seaplane is architected from the ground up as a regionally-distributed system where each cluster (Regional Clusters and Management Clusters) operates independently with its own ArgoCD instance for self-configuration. Within each region (containing 1 Regional Cluster + 1 to N Management Clusters), the configuration management system must support this cluster independence while sharing common application definitions and enabling coordinated deployments across environments.
 
 - **Problem Statement**: How to manage application configuration across multiple regions and environments while supporting independent regional operations, progressive deployments, and maintaining audit trails for production safety
 - **Constraints**: Must integrate with fully private EKS clusters, support region-specific customizations, enable version control for production deployments, and scale to hundreds of regions
@@ -16,7 +16,7 @@ The ROSA Regional Platform is architected from the ground up as a regionally-dis
 
 ## Architecture Overview
 
-The ROSA Regional Platform implements a GitOps cluster configuration system using ArgoCD ApplicationSets with hash-based versioning for production-grade deployment controls while maintaining regional independence.
+The ROSA Seaplane implements a GitOps cluster configuration system using ArgoCD ApplicationSets with hash-based versioning for production-grade deployment controls while maintaining regional independence.
 
 ### Foundation Concepts
 
@@ -53,7 +53,7 @@ sequenceDiagram
     AppSet->>Secret: Read cluster labels/annotations for identity
     AppSet->>Git: Discover charts based on cluster_type
     AppSet->>Git: Use cluster context for value overrides
-    AppSet->>Apps: Generate Applications (maestro, hypershift, etc.)
+    AppSet->>Apps: Generate Applications (kube-applier, hypershift, etc.)
 ```
 
 **Core Process**: ECS bootstrap creates the cluster identity secret and initial Application. ArgoCD then takes over, using the ApplicationSet to dynamically discover and deploy applications based on the cluster's identity.
@@ -160,7 +160,7 @@ spec:
 
 4. **GitHub Workaround**: The `replace "github.com" "github.com:443"` in the values source avoids ArgoCD issues with duplicate repository references.
 
-5. **Matrix Result**: If Git discovers 3 directories (hypershift, maestro, argocd), the matrix creates 3 Applications for that cluster, each using the appropriate chart version and latest rendered values.
+5. **Matrix Result**: If Git discovers 3 directories (hypershift, kube-applier, argocd), the matrix creates 3 Applications for that cluster, each using the appropriate chart version and latest rendered values.
 
 ### Configuration Hierarchy
 
@@ -307,7 +307,7 @@ sequenceDiagram
     ECS->>ArgoCD: Create Application pointing to static path
     ArgoCD->>Git: Pull from argocd/charts/management-cluster
     Git->>ArgoCD: Return static charts + values
-    ArgoCD->>Apps: Deploy applications (maestro, hypershift, etc.)
+    ArgoCD->>Apps: Deploy applications (kube-applier, hypershift, etc.)
 ```
 
 ```yaml
@@ -354,14 +354,14 @@ sequenceDiagram
     ECS->>ArgoCD: Create Application pointing to rendered path
     ArgoCD->>Git: Pull from rendered/management-cluster/integration/us-west-1
     Git->>ArgoCD: Return region-specific rendered charts
-    ArgoCD->>Apps: Deploy applications (maestro, hypershift, etc.)
+    ArgoCD->>Apps: Deploy applications (kube-applier, hypershift, etc.)
 ```
 
 **Repository Structure**:
 
-```
+```text
 config/management-cluster/
-├── maestro/
+├── kube-applier/
 │   ├── Chart.yaml
 │   ├── values.yaml (defaults)
 │   └── integration/us-west-1/  # Override yamls/applications (values set in rendered/)
@@ -371,7 +371,7 @@ config/management-cluster/
     └── integration/us-west-1/  # Override yamls/applications (values set in rendered/)
 
 rendered/management-cluster/integration/us-west-1/  # Generated by render script
-├── maestro/
+├── kube-applier/
 │   ├── Chart.yaml (copied)
 │   └── values.yaml (merged with overrides)
 └── hypershift/
@@ -435,7 +435,7 @@ sequenceDiagram
     AppSet->>Secret: Read cluster labels/annotations for identity
     AppSet->>Git: Discover charts from config/management-cluster/*
     AppSet->>Git: Use rendered values for cluster region/env
-    AppSet->>Apps: Generate Applications (maestro, hypershift, etc.)
+    AppSet->>Apps: Generate Applications (kube-applier, hypershift, etc.)
 ```
 
 ```yaml
@@ -455,7 +455,7 @@ metadata:
     cluster_name: mc01
   annotations:
     git_repo: https://github.com/openshift-online/rosa-platform
-    git_revision: HEAD  # Allows changes for dev
+    git_revision: HEAD # Allows changes for dev
 type: Opaque
 
 # Application created by ECS task
@@ -483,12 +483,12 @@ spec:
           - git:
               directories:
                 - path: argocd/config/management-cluster/*
-              repoURL: '{{ .metadata.annotations.git_repo }}'
-              revision: '{{ .metadata.annotations.git_revision }}'
+              repoURL: "{{ .metadata.annotations.git_repo }}"
+              revision: "{{ .metadata.annotations.git_revision }}"
   template:
     spec:
       source:
-        path: '{{ .path.path }}'
+        path: "{{ .path.path }}"
         helm:
           valueFiles:
             - values.yaml

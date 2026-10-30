@@ -1,10 +1,10 @@
 ### What cluster types does the regional architecture support?
 
-The regional architecture is designed exclusively for **ROSA HCP** (Hosted Control Planes). For the complete scope and architecture overview, see [ROSA Regional Platform](README.md#scope).
+The regional architecture is designed exclusively for **ROSA HCP** (Hosted Control Planes). For the complete scope and architecture overview, see [ROSA Seaplane](README.md#scope).
 
 ### What is the Regional Cluster and what services run on it?
 
-The Regional Cluster (RC) is an EKS-based cluster running core regional services (Platform API, CLM, Maestro, ArgoCD, Tekton). For the complete three-layer architecture and component details, see [Architecture at a Glance](README.md#architecture-at-a-glance).
+The Regional Cluster (RC) is an EKS-based cluster running core regional services (Platform API, seaplane-operator, kube-applier, ArgoCD, Tekton). For the complete three-layer architecture and component details, see [Architecture at a Glance](README.md#architecture-at-a-glance).
 
 ### What is the difference between the Regional Cluster and the Regional-Access Cluster?
 
@@ -12,9 +12,9 @@ In this implementation we will **not** use Regional-Access Clusters. Instead, we
 
 ### What is the Management Cluster Reconciler (MCR)?
 
-- MCR is a component within CLM that orchestrates Management Cluster lifecycle
+- MCR is a component within the seaplane-operator that orchestrates Management Cluster lifecycle
 - It enables scalable management of multiple Management Clusters (MCs) per region, as opposed to having a statically defined list of MCs per region.
-- This component will be developed by the Hyperfleet team.
+- This component will be developed by the Seaplane team.
 
 ### Where is the global control plane located?
 
@@ -48,13 +48,13 @@ In this implementation we will **not** use Regional-Access Clusters. Instead, we
 
 ### What is the path to recovery after a disaster?
 
-- **Source of truth**: CLM is the single declarative source of truth for cluster state. Its data is persisted in a dedicated RDS database, with regular cross-region backups.
+- **Source of truth**: seaplane-db (Aurora PostgreSQL) is the single declarative source of truth for cluster state, with regular cross-region backups.
 - **etcd state of MCs**: Critical for hosted cluster data; etcd snapshots will be continuously backed up to a dedicated DR AWS account (per region)
-- **Maestro cache**: Can be rebuilt from CLM; Maestro caches state for performance but CLM is authoritative. Loss of Maestro cache does not impact recovery.
+- **kube-applier DynamoDB tables**: Can be rebuilt from seaplane-db; kube-applier tables cache desire/status state for resource distribution but seaplane-db is authoritative. Loss of these tables does not prevent recovery, though observability and reconciliation continuity may be temporarily affected until state is rehydrated.
 - **Recovery path**:
   - Management Cluster recovery: Restore from etcd backups in the DR account
   - Hosted Cluster recovery: etcd snapshots allow restoration of customer control planes
-  - CLM state: Persisted in a dedicated RDS database
+  - seaplane-db state: Persisted in Aurora PostgreSQL
 - **Break-glass access**: On-demand break-glass access for emergency access when normal management flows are unavailable
 
 ### What are the key SLOs to maintain during an outage?
@@ -62,20 +62,20 @@ In this implementation we will **not** use Regional-Access Clusters. Instead, we
 This list is not complete, but some key ones are:
 
 - Customer cluster API access (HCP control planes) and CUJs
-- CLM for cluster lifecycle operations
+- Seaplane-operator for cluster lifecycle operations
 - MC Reconciler for dynamic scaling of MCs
 - Management Cluster availability (hosting control planes)
 
 ### What happens when the Kubernetes API on a Management Cluster goes down?
 
 - Management Clusters are EKS clusters managed. We would open a support case with AWS to restore the API.
-- If the Management Cluster is unrecoverable, we will have to provision a new MC, and restore all the HCPs from etcd backups, as well as update the single source of truth (CLM).
+- If the Management Cluster is unrecoverable, we will have to provision a new MC, and restore all the HCPs from etcd backups, as well as update the single source of truth (seaplane-db).
 
-### Where does the Maestro client run and how does it handle API unavailability?
+### How does kube-applier distribute resources to Management Clusters?
 
-A Maestro agent runs on each Management Cluster, subscribing to MQTT topics and applying received resources to the local Kubernetes API. If the MC API is non-responsive, observability alerts notify SREs.
+A kube-applier controller runs on each Management Cluster, reading desire documents from DynamoDB tables (written by the seaplane-operator in the RC account) via seaplane-dynamo GSI polling and applying them to the local Kubernetes API. If the MC API is non-responsive, observability alerts notify SREs.
 
-For full architecture details, see [Maestro MQTT Resource Distribution](design/maestro-mqtt-resource-distribution.md).
+For the current architecture, see [Seaplane Architecture](design/regional-control-plane-architecture.md).
 
 ### How are new regions deployed?
 
@@ -114,9 +114,9 @@ An AWS feature that enables private connectivity between API Gateway and VPC res
 
 ### Is OCM/CS deployed to each region?
 
-**No** — OCM, CS, and AMS are replaced by **CLM** (Cluster Lifecycle Manager), developed as part of the HyperFleet project. One CLM instance runs in each Regional Cluster as the single source of truth for cluster state.
+**No** — OCM, CS, and AMS are replaced by the **seaplane-operator**, developed as part of the Seaplane project. One seaplane-operator instance runs in each Regional Cluster, backed by seaplane-db (Aurora PostgreSQL) as the single source of truth for cluster state.
 
-For CLM component details (hyperfleet-api, hyperfleet-sentinel, hyperfleet-adapter), see the [HyperFleet Adapter1 chart](../argocd/config/regional-cluster/hyperfleet-adapter1-chart/README.md) and [HyperFleet Infrastructure module](../terraform/modules/hyperfleet-infrastructure/README.md).
+For architecture details, see [Seaplane Architecture](design/regional-control-plane-architecture.md).
 
 ### Is this design without App-Interface in favor of ArgoCD?
 

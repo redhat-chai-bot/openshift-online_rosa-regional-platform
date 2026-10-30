@@ -168,6 +168,9 @@ def resolve_templates(value: Any, context: dict[str, Any]) -> Any:
             native = _resolve_var_path(context, m.group(1))
             if native is not _MISSING and isinstance(native, (list, dict)):
                 return native
+            if native is not _MISSING and native is None:
+                # Preserve None values instead of converting to string "None"
+                return None
             if native is not _MISSING and isinstance(native, (int, float, bool)):
                 native_type = type(native)
             elif native is _MISSING:
@@ -283,12 +286,15 @@ def cleanup_stale_files(
                 continue
 
             valid_mcs = env_region_mcs.get(env_dir.name, {}).get(region_dir.name, set())
+            valid_input_dirs = {
+                "pipeline-provisioner-inputs",
+                "pipeline-regional-cluster-inputs",
+                *(f"pipeline-management-cluster-{mc}-inputs" for mc in valid_mcs),
+            }
             for item in region_dir.iterdir():
-                if item.is_dir() and item.name.startswith("pipeline-management-cluster-"):
-                    mc_name = item.name.removeprefix("pipeline-management-cluster-").removesuffix("-inputs")
-                    if mc_name not in valid_mcs:
-                        print(f"  [CLEANUP] Removing stale MC dir: {item}")
-                        shutil.rmtree(item)
+                if item.is_dir() and item.name.endswith("-inputs") and item.name not in valid_input_dirs:
+                    print(f"  [CLEANUP] Removing stale generated input dir: {item}")
+                    shutil.rmtree(item)
 
             prov_dir = region_dir / "pipeline-provisioner-inputs"
             if prov_dir.exists():
@@ -300,6 +306,57 @@ def cleanup_stale_files(
 
 
 # -- Context building ---------------------------------------------------------
+
+
+def _format_cluster_id(pattern: str, prefix: str, mc_key: str = "") -> str:
+    """Format a cluster ID without leading separators for shared environments."""
+    cluster_id = pattern.format(prefix=prefix, mc_key=mc_key).strip("-")
+    if not cluster_id:
+        raise ValueError(f"cluster naming pattern produced an empty ID: {pattern!r}")
+    return cluster_id
+
+
+def validate_cluster_topology(
+    merged: dict[str, Any], ctx: dict[str, Any], mc_list: list[dict],
+    env_name: str, region: str,
+) -> None:
+    """Validate rendered RC/MC identities and their required account hand-off."""
+    provision_mcs = merged.get("provision_mcs", {})
+    if not isinstance(provision_mcs, dict):
+        raise ValueError(
+            f"{env_name}/{region}: provision_mcs must be a mapping of MC keys to config"
+        )
+
+    errors = []
+    regional_id = str(ctx.get("regional_id", ""))
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", regional_id):
+        errors.append(f"regional_id={regional_id!r} is not a lowercase cluster ID")
+
+    seen_ids = {regional_id: "RC"}
+    for mc_key, mc in zip(provision_mcs, mc_list, strict=True):
+        management_id = str(mc.get("management_id", ""))
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", management_id):
+            errors.append(
+                f"MC {mc_key!r} management_id={management_id!r} is not a lowercase cluster ID"
+            )
+        elif management_id in seen_ids:
+            errors.append(
+                f"cluster ID {management_id!r} is used by both "
+                f"{seen_ids[management_id]} and MC {mc_key!r}"
+            )
+        else:
+            seen_ids[management_id] = f"MC {mc_key}"
+
+        if mc.get("account_id") in (None, ""):
+            errors.append(
+                f"MC {mc_key!r} has no account_id and no "
+                "aws.management_cluster_account_id default"
+            )
+
+    if errors:
+        raise ValueError(
+            f"Invalid RC/MC topology for {env_name}/{region}: " + "; ".join(errors)
+        )
 
 
 def build_context(
@@ -325,10 +382,30 @@ def build_context(
     # Resolve templated config values that other templates depend on
     aws = ctx.get("aws", {})
     ctx["account_id"] = resolve_templates(aws.get("account_id", ""), ctx)
+    ctx["child_admin_role_name"] = resolve_templates(
+        aws.get("child_admin_role_name", "OrganizationAccountAccessRole"), ctx
+    )
+    ctx["zoa_access_trusted_assumer_role_names"] = aws.get(
+        "zoa_access_trusted_assumer_role_names", []
+    )
+    ctx["zoa_access_trusted_assumer_role_name_suffixes"] = aws.get(
+        "zoa_access_trusted_assumer_role_name_suffixes", []
+    )
     ctx["terraform_tags"] = resolve_templates(ctx.get("terraform_tags", {}), ctx)
     ctx["regional_cluster"] = resolve_templates(ctx.get("regional_cluster", {}), ctx)
     ctx["management_cluster_defaults"] = resolve_templates(ctx.get("management_cluster_defaults", {}), ctx)
     ctx["dns"] = resolve_templates(ctx.get("dns", {}), ctx)
+
+    # Compute regional_id using configurable naming pattern
+    cluster_naming = ctx.get("cluster_naming", {})
+    rc_pattern = cluster_naming.get("rc_pattern", "{prefix}-regional")
+    ctx["regional_id"] = _format_cluster_id(rc_pattern, eph_prefix)
+
+    if ctx["regional_cluster"].get("enable_write_sre_tools") and env_name != "ephemeral":
+        raise ValueError(
+            f"regional_cluster.enable_write_sre_tools can only be true for ephemeral "
+            f"environments, got environment '{env_name}'"
+        )
 
     return ctx
 
@@ -341,9 +418,19 @@ def build_mc_list(
     default_mc_account = merged.get("aws", {}).get("management_cluster_account_id")
     mc_list = []
 
+    # Get MC naming pattern from config
+    cluster_naming = merged.get("cluster_naming", {})
+    mc_pattern = cluster_naming.get("mc_pattern", "{prefix}-{mc_key}")
+
+    if not isinstance(mc_dict, dict):
+        raise ValueError("provision_mcs must be a mapping of MC keys to config")
+
     for mc_key, mc_val in mc_dict.items():
+        if mc_val is not None and not isinstance(mc_val, dict):
+            raise ValueError(f"MC {mc_key!r} must use a mapping value or {{}}")
         mc = dict(mc_val) if mc_val else {}
-        mc["management_id"] = f"{eph_prefix}-{mc_key}" if eph_prefix else mc_key
+        # Compute management_id using configurable naming pattern
+        mc["management_id"] = _format_cluster_id(mc_pattern, eph_prefix, mc_key)
         if "account_id" not in mc and default_mc_account:
             mc["account_id"] = default_mc_account
         mc = resolve_templates(mc, {**ctx, "cluster_prefix": mc_key})
@@ -355,12 +442,19 @@ def build_mc_list(
 # -- Documentation ------------------------------------------------------------
 
 # Variables injected by render.py, not from config files.
+# Note: Go template keywords (if/else/end) that appear in escaped Go template strings
+# (e.g., {{ '{{ if ... }}X{{ else }}Y{{ end }}' }}) are automatically filtered by
+# scan_template_variables() and do not need to be listed here.
 CONTEXT_VARS = {
     "environment", "aws_region",
-    "account_id", "management_clusters",
+    "account_id",
+    "child_admin_role_name",
+    "zoa_access_trusted_assumer_role_names",
+    "zoa_access_trusted_assumer_role_name_suffixes",
+    "management_clusters",
     "cluster_type",
     "application_values", "region_configs", "eph_prefix",
-    "delete", "delete_pipeline", "mc_key", "region",
+    "mc_key", "region",
     "pinned", "mc_account_ids", "ci",
 }
 
@@ -376,6 +470,13 @@ _TPL_PATTERNS = [
 ]
 # Matches bracket-string access: {{ var['key'].rest }} → var.key.rest
 _TPL_BRACKET_PATTERN = re.compile(r"\{\{[\s-]*([a-zA-Z_]\w*)\['([^']+)'\]([\w.]*)")
+# Matches escaped Go template strings wrapped in single or double quotes:
+#   {{ '{{ ... }}' }},  {{ "{{ ... }}" }},  {% '{{ ... }}' %},  {% "{{ ... }}" %}
+# These contain Go template keywords (if/else/end) that should not be treated as Jinja2 variables.
+_ESCAPED_GO_TEMPLATE_RE = re.compile(
+    r"""\{\{[\s-]*(?:'[^']*\{\{[^}]*\}\}[^']*'|"[^"]*\{\{[^}]*\}\}[^"]*")[\s-]*\}\}"""
+    r"""|\{%[\s-]*(?:'[^']*\{\{[^}]*\}\}[^']*'|"[^"]*\{\{[^}]*\}\}[^"]*")[\s-]*%\}"""
+)
 
 
 def scan_annotations(content: str) -> dict[str, dict[str, Any]]:
@@ -392,14 +493,32 @@ def scan_annotations(content: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _is_inside_escaped_go_template(pos: int, skip_ranges: list[tuple[int, int]]) -> bool:
+    """Check if a position falls inside an escaped Go template string."""
+    return any(start <= pos < end for start, end in skip_ranges)
+
+
 def scan_template_variables(templates_dir: Path) -> dict[str, list[str]]:
-    """Scan templates for variable references. Returns {var: [template_paths]}."""
+    """Scan templates for variable references. Returns {var: [template_paths]}.
+
+    Variables inside escaped Go template strings (e.g., {{ '{{ if ... }}X{{ else }}Y{{ end }}' }})
+    are filtered out, as they are Go template keywords, not Jinja2 variables.
+    """
     var_to_templates: dict[str, list[str]] = {}
     for tpl in sorted(templates_dir.rglob("*.j2")):
         rel = str(tpl.relative_to(templates_dir))
         content = tpl.read_text()
+
+        # Build a set of character ranges to skip (escaped Go template strings)
+        skip_ranges: list[tuple[int, int]] = []
+        for match in _ESCAPED_GO_TEMPLATE_RE.finditer(content):
+            skip_ranges.append((match.start(), match.end()))
+
         for pattern in _TPL_PATTERNS:
             for match in pattern.finditer(content):
+                # Skip variables inside escaped Go template strings
+                if _is_inside_escaped_go_template(match.start(), skip_ranges):
+                    continue
                 var = match.group(1)
                 if var.startswith("_") or var.split(".")[0] in ("true", "false", "none", "loop"):
                     continue
@@ -408,6 +527,9 @@ def scan_template_variables(templates_dir: Path) -> dict[str, list[str]]:
                 if rel not in var_to_templates[var]:
                     var_to_templates[var].append(rel)
         for match in _TPL_BRACKET_PATTERN.finditer(content):
+            # Skip variables inside escaped Go template strings
+            if _is_inside_escaped_go_template(match.start(), skip_ranges):
+                continue
             var = match.group(1) + "." + match.group(2) + match.group(3)
             if var.startswith("_"):
                 continue
@@ -686,6 +808,7 @@ def main() -> int:
             merged = region_configs[region]
             ctx = build_context(merged, env_name, region, eph_prefix)
             mc_list = build_mc_list(ctx, merged, eph_prefix)
+            validate_cluster_topology(merged, ctx, mc_list, env_name, region)
             ctx["management_clusters"] = mc_list
             env_region_mcs[env_name][region] = {mc["management_id"] for mc in mc_list}
 

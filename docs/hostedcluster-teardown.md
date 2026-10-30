@@ -7,6 +7,25 @@
 > Under normal operation, clusters are automatically cleaned up after 24 hours
 > and no manual teardown is needed.
 
+## Preferred: ROSA CLI
+
+When the platform API is reachable, use the
+[ROSA CLI (`seaplane-v2` branch)](https://github.com/openshift/rosa/tree/seaplane-v2)
+— it handles cluster deletion without requiring break-glass access:
+
+```bash
+./bin/rosa delete cluster -c <cluster-name>
+```
+
+CloudFormation stacks in the customer AWS account (`cluster-iam`, `cluster-vpc`,
+`cluster-oidc`) are **not** deleted automatically. You can reuse them for the next
+cluster with the same name. To delete them manually, first complete step 4 and
+confirm the HostedCluster and NodePool are removed. Then delete them via the AWS
+Console / `aws cloudformation delete-stack` (step 5 below).
+
+Use the manual procedure below only when `rosa delete cluster` is not viable
+(e.g. platform API is down, CLM is stuck, or a force-cleanup of all clusters is needed).
+
 ## Manual Teardown
 
 The full teardown flow is:
@@ -17,7 +36,7 @@ The full teardown flow is:
 4. Wait for the HostedCluster and NodePool to be removed from the MC
 5. Delete the CloudFormation stacks in the customer AWS account
 
-### Step 1 & 2 — Clean Up the CLM Database (Regional Cluster)
+### Step 1 & 2 — Clean Up the seaplane-db Database (Regional Cluster)
 
 Open a bastion session to the Regional Cluster:
 
@@ -29,13 +48,13 @@ make int-bastion-rc
 make ephemeral-bastion-rc
 ```
 
-Once connected, run the cleanup script below. The script connects to the CLM
+Once connected, run the cleanup script below. The script connects to the seaplane-db
 database, lists all clusters, and lets you choose to delete a single cluster or
 all clusters. It removes records from both the `clusters` and
 `adapter_statuses` tables.
 
 <details>
-<summary>cleanup-clm-db.sh</summary>
+<summary>cleanup-seaplane-db.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -59,8 +78,8 @@ for cmd in oc jq psql; do
     fi
 done
 
-NAMESPACE="hyperfleet-system"
-SECRET_NAME="hyperfleet-api-db-credentials"
+NAMESPACE="seaplane-system"
+SECRET_NAME="seaplane-api-db-credentials"
 
 print_header "Retrieving database credentials from Kubernetes secret"
 
@@ -74,7 +93,7 @@ fi
 DB_PASSWORD=$(oc get secret -n "$NAMESPACE" "$SECRET_NAME" -o jsonpath='{.data.db\.password}' | base64 -d)
 DB_HOST=$(oc get secret -n "$NAMESPACE" "$SECRET_NAME" -o jsonpath='{.data.db\.host}' | base64 -d)
 DB_PORT=$(oc get secret -n "$NAMESPACE" "$SECRET_NAME" -o jsonpath='{.data.db\.port}' | base64 -d)
-DB_NAME="hyperfleet"
+DB_NAME="seaplane"
 DB_PORT="${DB_PORT:-5432}"
 
 if [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ] || [ -z "$DB_HOST" ]; then
@@ -146,7 +165,7 @@ ADAPTER_TABLE_EXISTS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NA
     "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adapter_statuses');")
 
 echo ""
-print_info "WARNING: This will delete $DELETE_DESC from the CLM database!"
+print_info "WARNING: This will delete $DELETE_DESC from the seaplane-db database!"
 if [ "$ADAPTER_TABLE_EXISTS" = "t" ]; then
     print_info "This will also delete matching records from the adapter_statuses table."
 fi
@@ -228,7 +247,7 @@ done
 
 ### Step 4 — Wait for HostedCluster and NodePool Removal (Management Cluster)
 
-After deleting the resource bundles, Maestro will propagate the deletion to the
+After deleting the resource bundles, kube-applier will propagate the deletion to the
 Management Cluster. Wait for the HostedCluster and NodePool resources to be
 fully removed before proceeding.
 
@@ -278,11 +297,11 @@ Job from the cleanup cronjob with `MAX_AGE_HOURS` set to `0`.
 From the RC bastion:
 
 ```bash
-oc -n hyperfleet-system get cronjob cluster-cleanup -o json \
+oc -n seaplane-system get cronjob cluster-cleanup -o json \
   | jq '{
       apiVersion: "batch/v1",
       kind: "Job",
-      metadata: {name: "cluster-cleanup-\(now | floor)", namespace: "hyperfleet-system"},
+      metadata: {name: "cluster-cleanup-\(now | floor)", namespace: "seaplane-system"},
       spec: (.spec.jobTemplate.spec | .template.spec.containers[0].env |= map(
         if .name == "MAX_AGE_HOURS" then .value = "0" else . end))
     }' \

@@ -16,6 +16,10 @@ resource "aws_iam_role" "execution" {
       }
     ]
   })
+
+  tags = merge(local.common_tags, {
+    Name = "${var.cluster_id}-bootstrap-execution-role"
+  })
 }
 
 # Attach AWS managed policy for ECS task execution
@@ -39,6 +43,10 @@ resource "aws_iam_role" "task" {
         }
       }
     ]
+  })
+
+  tags = merge(local.common_tags, {
+    Name = "${var.cluster_id}-bootstrap-task-role"
   })
 }
 
@@ -72,7 +80,7 @@ resource "aws_iam_role_policy" "task_bootstrap" {
           "eks:DescribeAddon",
           "eks:UpdateAddon"
         ]
-        Resource = "arn:aws:eks:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:addon/${var.eks_cluster_name}/*/*"
+        Resource = "arn:aws:eks:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:addon/${var.eks_cluster_name}/*/*"
       },
       {
         Effect = "Allow"
@@ -83,8 +91,8 @@ resource "aws_iam_role_policy" "task_bootstrap" {
           "ssm:GetParametersByPath"
         ]
         Resource = [
-          "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/${var.cluster_id}/*",
-          "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/argocd/*"
+          "arn:aws:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.cluster_id}/*",
+          "arn:aws:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/argocd/*"
         ]
       },
       {
@@ -93,7 +101,39 @@ resource "aws_iam_role_policy" "task_bootstrap" {
           "secretsmanager:GetSecretValue",
           "secretsmanager:DescribeSecret"
         ]
-        Resource = "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.cluster_id}/*"
+        Resource = "arn:aws:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:${var.cluster_id}/*"
+      }
+    ]
+  })
+}
+
+# Seaplane DB access for the ZOA read-only role provisioning step.
+# Created only on the RC (enable_zoa_db_bootstrap), which has seaplane-db.
+# The count must be driven by a plan-time-known flag rather than the DSN secret
+# ARN, which is unknown at plan time on a greenfield apply (the secret is
+# created in the same apply). The bootstrap task reads the master DSN from
+# Secrets Manager and must decrypt it with the DB KMS key. The general
+# secretsmanager grant above scopes to "${cluster_id}/*", which does NOT match
+# the "${cluster_id}-seaplane-db-dsn" name, so an explicit grant on that ARN
+# is required.
+resource "aws_iam_role_policy" "task_seaplane_db" {
+  count = var.enable_zoa_db_bootstrap ? 1 : 0
+
+  name = "${var.cluster_id}-bootstrap-seaplane-db"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = var.seaplane_db_dsn_secret_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = var.seaplane_db_kms_key_arn
       }
     ]
   })
@@ -108,6 +148,10 @@ resource "aws_eks_access_entry" "bootstrap_task" {
   cluster_name  = var.eks_cluster_name
   principal_arn = aws_iam_role.task.arn
   type          = "STANDARD"
+
+  tags = merge(local.common_tags, {
+    Name = "${var.cluster_id}-bootstrap-task-access"
+  })
 }
 
 # Associate cluster admin policy with the access entry

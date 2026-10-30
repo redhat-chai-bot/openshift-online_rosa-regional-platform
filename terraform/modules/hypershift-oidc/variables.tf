@@ -27,6 +27,7 @@ variable "oidc_bucket_name" {
   }
 }
 
+# tflint-ignore: terraform_unused_declarations
 variable "oidc_bucket_arn" {
   description = "S3 bucket ARN for OIDC discovery documents (owned by the Regional Cluster)"
   type        = string
@@ -49,6 +50,12 @@ variable "oidc_bucket_region" {
 
 variable "oidc_writer_role_arn" {
   description = "ARN of the RC-side oidc-writer IAM role (MC operator assumes this for OIDC S3+KMS access)"
+  type        = string
+  default     = ""
+}
+
+variable "oidc_key_reader_role_arn" {
+  description = "ARN of the RC-side oidc-key-reader IAM role (MC ESO assumes this to read OIDC signing keys from Secrets Manager)"
   type        = string
   default     = ""
 }

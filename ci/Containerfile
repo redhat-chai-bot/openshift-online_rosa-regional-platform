@@ -1,4 +1,4 @@
-# CI build-root image for rosa-regional-platform PR checks.
+# CI build-root image for rosa-seaplane PR checks.
 # Used by ci-operator via build_root.project_image.dockerfile_path.
 # Tools are layer-cached — installs only re-run when this file changes.
 
@@ -14,13 +14,17 @@ RUN if [ -n "${PROXY_CA_CERT}" ]; then \
 
 # Tool versions
 ARG TERRAFORM_VERSION=1.14.3
-ARG HELM_VERSION=v3.16.0
+ARG TERRAGRUNT_VERSION=1.1.1
+ARG HELM_VERSION=v3.21.3
 ARG UV_VERSION=0.6.0
 ARG AWS_CLI_VERSION=2.34.19
 ARG PRETTIER_VERSION=3.8.1
 ARG YQ_VERSION=v4.44.3
+ARG KUBECTL_VERSION=v1.36.2
 ARG K6_VERSION=0.55.0
 ARG PROMETHEUS_VERSION=3.4.1
+ARG LEAKTK_VERSION=0.3.3
+ARG TFLINT_VERSION=0.64.0
 
 # Global curl retry and timeout settings for improved download reliability
 ARG CURL_RETRY=3
@@ -33,6 +37,7 @@ RUN dnf install -y \
         make \
         jq \
         unzip \
+        xz \
         python3-pip \
         findutils \
         gnupg2 \
@@ -76,12 +81,43 @@ RUN arch=$(uname -m) && \
     rm -f "${TF_PACKAGE}" "terraform_${TERRAFORM_VERSION}_SHA256SUMS" \
         "terraform_${TERRAFORM_VERSION}_SHA256SUMS.sig"
 
-# Helm 3 (pinned release tag; get-helm-3 verifies checksums by default)
+# Terragrunt (checksum-verified)
 ARG CURL_RETRY
 ARG CURL_RETRY_DELAY
 ARG CURL_MAX_TIME
-RUN curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSL "https://raw.githubusercontent.com/helm/helm/${HELM_VERSION}/scripts/get-helm-3" \
-    | DESIRED_VERSION="${HELM_VERSION}" VERIFY_CHECKSUM=true bash
+RUN arch=$(uname -m) && \
+    case "${arch}" in \
+        x86_64)  arch="amd64" ;; \
+        aarch64) arch="arm64" ;; \
+    esac && \
+    TG_BASE_URL="https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}" && \
+    TG_BIN="terragrunt_linux_${arch}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSL "${TG_BASE_URL}/${TG_BIN}" -o "/tmp/${TG_BIN}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSL "${TG_BASE_URL}/SHA256SUMS" -o /tmp/tg_sha256sums && \
+    grep "${TG_BIN}$" /tmp/tg_sha256sums | (cd /tmp && sha256sum -c -) && \
+    install -m 0755 "/tmp/${TG_BIN}" /usr/local/bin/terragrunt && \
+    rm -f "/tmp/${TG_BIN}" /tmp/tg_sha256sums && \
+    terragrunt --version
+
+# Helm 3 (SHA-256 verified with retry logic)
+ARG CURL_RETRY
+ARG CURL_RETRY_DELAY
+ARG CURL_MAX_TIME
+RUN arch=$(uname -m) && \
+    case "${arch}" in \
+        x86_64)  arch="amd64" ;; \
+        aarch64) arch="arm64" ;; \
+    esac && \
+    HELM_PACKAGE="helm-${HELM_VERSION}-linux-${arch}.tar.gz" && \
+    HELM_BASE_URL="https://get.helm.sh" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "${HELM_BASE_URL}/${HELM_PACKAGE}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "${HELM_BASE_URL}/${HELM_PACKAGE}.sha256sum" && \
+    sha256sum -c "${HELM_PACKAGE}.sha256sum" && \
+    tar -xzf "${HELM_PACKAGE}" -C /tmp && \
+    mv /tmp/linux-${arch}/helm /usr/local/bin/helm && \
+    chmod +x /usr/local/bin/helm && \
+    rm -rf /tmp/linux-${arch} "${HELM_PACKAGE}" "${HELM_PACKAGE}.sha256sum" && \
+    helm version
 
 # uv (Python package manager - pinned version, installer verifies binary checksum)
 ARG CURL_RETRY
@@ -107,6 +143,28 @@ RUN arch=$(uname -m) && \
     rm -rf awscliv2.zip ./aws && \
     aws --version
 
+# Session Manager plugin (SSM port-forward to ephemeral bastion)
+# Bump SESSION_MANAGER_PLUGIN_BUILD to invalidate stale pipeline:src layer cache in CI.
+ARG SESSION_MANAGER_PLUGIN_BUILD=1
+ARG CURL_RETRY
+ARG CURL_RETRY_DELAY
+ARG CURL_MAX_TIME
+RUN arch=$(uname -m) && \
+    case "${arch}" in \
+        x86_64)  SM_ARCH="64bit" ;; \
+        aarch64) SM_ARCH="arm64" ;; \
+    esac && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSL \
+        "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/linux_${SM_ARCH}/session-manager-plugin.rpm" \
+        -o /tmp/session-manager-plugin.rpm && \
+    dnf install -y /tmp/session-manager-plugin.rpm && \
+    rm -f /tmp/session-manager-plugin.rpm && \
+    chmod -R a+rx /usr/local/sessionmanagerplugin && \
+    ln -sf /usr/local/sessionmanagerplugin/bin/session-manager-plugin /usr/bin/session-manager-plugin && \
+    session-manager-plugin --version
+
+ENV PATH="/usr/local/sessionmanagerplugin/bin:/usr/bin:/usr/local/bin:${PATH}"
+
 # yq (YAML processor)
 ARG CURL_RETRY
 ARG CURL_RETRY_DELAY
@@ -119,6 +177,22 @@ RUN arch=$(uname -m) && \
     curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${YQ_ARCH}" -o /usr/local/bin/yq && \
     chmod +x /usr/local/bin/yq && \
     yq --version
+
+# kubectl (Kubernetes CLI, checksum-verified)
+ARG CURL_RETRY
+ARG CURL_RETRY_DELAY
+ARG CURL_MAX_TIME
+RUN arch=$(uname -m) && \
+    case "${arch}" in \
+        x86_64)  KUBECTL_ARCH="amd64" ;; \
+        aarch64) KUBECTL_ARCH="arm64" ;; \
+    esac && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl.sha256" && \
+    echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c - && \
+    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
+    rm -f kubectl kubectl.sha256 && \
+    kubectl version --client
 
 # k6 (load testing, checksum-verified)
 ARG CURL_RETRY
@@ -158,6 +232,46 @@ RUN arch=$(uname -m) && \
     chmod +x /usr/local/bin/promtool && \
     rm -f "${PROM_TAR}" sha256sums.txt && \
     promtool --version
+
+# leaktk (secret leak scanner, checksum-verified)
+ARG CURL_RETRY
+ARG CURL_RETRY_DELAY
+ARG CURL_MAX_TIME
+RUN arch=$(uname -m) && \
+    case "${arch}" in \
+        x86_64)  LEAKTK_ARCH="x86_64" ;; \
+        aarch64) LEAKTK_ARCH="arm64" ;; \
+    esac && \
+    LEAKTK_TAR="leaktk-${LEAKTK_VERSION}-linux-${LEAKTK_ARCH}.tar.xz" && \
+    LEAKTK_CHECKSUMS="leaktk_${LEAKTK_VERSION}_checksums.txt" && \
+    LEAKTK_BASE="https://github.com/leaktk/leaktk/releases/download/v${LEAKTK_VERSION}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "${LEAKTK_BASE}/${LEAKTK_TAR}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "${LEAKTK_BASE}/${LEAKTK_CHECKSUMS}" && \
+    grep "${LEAKTK_TAR}" "${LEAKTK_CHECKSUMS}" | sha256sum -c - && \
+    tar -xJf "${LEAKTK_TAR}" -C /usr/local/bin leaktk && \
+    chmod +x /usr/local/bin/leaktk && \
+    rm -f "${LEAKTK_TAR}" "${LEAKTK_CHECKSUMS}" && \
+    leaktk version
+
+# tflint (Terraform linter for tag coverage checks, checksum-verified)
+ARG TFLINT_VERSION
+ARG CURL_RETRY
+ARG CURL_RETRY_DELAY
+ARG CURL_MAX_TIME
+RUN arch=$(uname -m) && \
+    case "${arch}" in \
+        x86_64)  TFLINT_ARCH="amd64" ;; \
+        aarch64) TFLINT_ARCH="arm64" ;; \
+    esac && \
+    TFLINT_ZIP="tflint_linux_${TFLINT_ARCH}.zip" && \
+    TFLINT_BASE="https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "${TFLINT_BASE}/${TFLINT_ZIP}" && \
+    curl --retry ${CURL_RETRY} --retry-delay ${CURL_RETRY_DELAY} --max-time ${CURL_MAX_TIME} -fsSLO "${TFLINT_BASE}/checksums.txt" && \
+    grep "${TFLINT_ZIP}" checksums.txt | sha256sum -c - && \
+    unzip -qo "${TFLINT_ZIP}" -d /usr/local/bin && \
+    chmod +x /usr/local/bin/tflint && \
+    rm -f "${TFLINT_ZIP}" checksums.txt && \
+    tflint --version
 
 # Pre-create cache directories writable by any UID (OpenShift runs as random UID)
 RUN mkdir -p /tmp/.uv-cache /tmp/.uv-python /tmp/.terraform.d /tmp/.cache/go-build /tmp/gopath && \

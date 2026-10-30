@@ -1,10 +1,12 @@
 # Pipeline-Based Cluster Lifecycle Management
 
-**Last Updated Date**: 2026-03-04
+**Last Updated Date**: 2026-09-22
+
+> Historical architecture. The modules, paths, and commands below describe the previous Terraform-managed pipeline hierarchy and are not instructions for the current checkout. See [CodePipeline Cluster Lifecycle](codepipeline-cluster-lifecycle.md) for the current design and migration requirements.
 
 ## Summary
 
-The ROSA Regional Platform implements a hierarchical, Git-driven pipeline architecture where a central pipeline-provisioner dynamically creates and manages per-cluster CodePipeline pipelines based on declarative configuration files, enabling scalable, auditable, and automated infrastructure lifecycle management across multiple AWS accounts and regions.
+The previous ROSA Seaplane architecture used a central pipeline-provisioner to dynamically create and manage Terraform-owned per-cluster CodePipelines from declarative configuration files across multiple AWS accounts and regions.
 
 ## Architecture Overview
 
@@ -20,7 +22,7 @@ graph TB
         RC1[Regional Cluster Pipeline<br/>us-east-1]
         RC2[Regional Cluster Pipeline<br/>eu-west-1]
         MC1[Management Cluster Pipeline<br/>mc01-us-east-1]
-        MC2[Management Cluster Pipeline<br/>mc02-us-east-1]
+        MC2[Management Cluster Pipeline<br/>mc01-eu-west-1]
     end
 
     subgraph "Layer 3: Infrastructure"
@@ -101,7 +103,7 @@ flowchart LR
 - Is idempotent and can run in normal or destroy mode
 - Runs in central account, stores terraform state in the target account, and deploys to target accounts
 - RC stages: Source → Deploy → Bootstrap-ArgoCD
-- MC stages: Source → Mint-IoT → Deploy → Bootstrap-ArgoCD → Register
+- MC stages: Source → Deploy → Bootstrap-ArgoCD → Register
 
 **Layer 3 - Infrastructure**:
 
@@ -155,7 +157,7 @@ The pipeline-provisioner is a "meta-pipeline" that manages other pipelines. It's
 The pipeline-provisioner must be created once manually:
 
 ```bash
-GITHUB_REPOSITORY=openshift-online/rosa-regional-platform \
+GITHUB_REPOSITORY=openshift-online/rosa-seaplane \
 GITHUB_BRANCH=main \
 TARGET_ENVIRONMENT=staging \
 ./scripts/bootstrap-central-account.sh
@@ -198,7 +200,7 @@ See: `terraform/config/pipeline-regional-cluster/`, `terraform/config/regional-c
 
 Provisions a Management Cluster (EKS for hosting customer control planes).
 
-- Stages: Source → Mint-IoT → Deploy → Bootstrap-ArgoCD → Register
+- Stages: Source → Deploy → Bootstrap-ArgoCD → Register
 - Triggers on changes to `deploy/<env>/<region>/pipeline-management-cluster-<cluster>-inputs/terraform.json`
 - Deploys to management cluster account (may differ from regional account)
 - The **Register** stage calls the Regional Cluster Platform API to register the Management Cluster as a known consumer, passing:

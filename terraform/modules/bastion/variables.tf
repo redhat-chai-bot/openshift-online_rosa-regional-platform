@@ -8,11 +8,6 @@ variable "cluster_name" {
   type        = string
 }
 
-variable "cluster_endpoint" {
-  description = "EKS cluster API endpoint URL"
-  type        = string
-}
-
 variable "cluster_security_group_id" {
   description = "Security group ID of the EKS cluster control plane"
   type        = string
@@ -59,7 +54,7 @@ variable "log_collector_memory" {
 }
 
 variable "container_image" {
-  description = "Container image for the bastion task (from platform-image module)"
+  description = "Container image for the bastion task (the platform image)"
   type        = string
 }
 

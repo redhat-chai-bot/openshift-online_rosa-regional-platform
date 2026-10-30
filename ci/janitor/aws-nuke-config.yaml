@@ -1,4 +1,4 @@
-# aws-nuke configuration for ROSA Regional Platform CI accounts.
+# aws-nuke configuration for ROSA Seaplane CI accounts.
 #
 # Reference: https://github.com/ekristen/aws-nuke (v3)
 
@@ -74,6 +74,19 @@ presets:
         - type: glob
           value: "*"
 
+      # Exclude AWS Security Incident Response (SIR) event rules and targets.
+      # These are service-managed and cannot be deleted, so aws-nuke leaves them
+      # in a "waiting" state indefinitely. Skipping them keeps a cleanup pass from
+      # getting stuck on resources it can never remove.
+      CloudWatchEventsRule:
+        - property: Name
+          type: glob
+          value: "SIR*"
+      CloudWatchEventsTarget:
+        - property: Name
+          type: glob
+          value: "SIR*"
+
       # Exclude OrgAdminAccessRole and ResourceExplorer roles
       IAMRole:
         - "OrganizationAccountAccessRole"
@@ -101,17 +114,20 @@ presets:
       ResourceExplorer2View: *glob-name-all
       ResourceExplorer2Index: *glob-name-all
 
-  # Preserve CI identity: IAM users "e2e" and "ci"
+  # Preserve CI identity: IAM users "e2e", "ci", and "chai-bot-s3-reader"
   ci:
     filters:
       IAMUser:
         - "e2e"
         - "ci"
+        - "chai-bot-s3-reader"
       IAMUserAccessKey: &ci-user-filters
         - property: UserName
           value: "e2e"
         - property: UserName
           value: "ci"
+        - property: UserName
+          value: "chai-bot-s3-reader"
       IAMUserPolicyAttachment: *ci-user-filters
       IAMUserPolicy: *glob-all
       IAMUserGroupAttachment: *ci-user-filters
@@ -219,6 +235,8 @@ settings:
   # Disable deletion protection on resources that may have it enabled
   # from failed terraform runs, so aws-nuke can delete them.
   RDSInstance:
+    DisableDeletionProtection: true
+  RDSDBCluster:
     DisableDeletionProtection: true
   DynamoDBTable:
     DisableDeletionProtection: true

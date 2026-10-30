@@ -65,28 +65,28 @@ Running `scripts/render.py` generates:
   - Region map with management cluster IDs per region.
 
 - **`deploy/<env>/<region>/pipeline-provisioner-inputs/terraform.json`**
-  - Consumer: `provision-pipelines.sh` (pipeline-provisioner pipeline)
-  - Trigger: Pipeline provisioner
+  - Consumer: `provision-cluster-resources.sh`
+  - Trigger: Central bootstrap or an explicit provisioner run
   - Contains: `domain`
 
 - **`deploy/<env>/<region>/pipeline-provisioner-inputs/regional-cluster.json`**
-  - Consumer: `provision-pipelines.sh` (pipeline-provisioner pipeline)
-  - Trigger: Pipeline provisioner
-  - Contains: `region`, `account_id`, `regional_id`, `delete_pipeline`
+  - Consumer: `provision-cluster-resources.sh`
+  - Trigger: Central bootstrap or an explicit provisioner run
+  - Contains: `region`, `account_id`, `regional_id`, `platform_image`
 
 - **`deploy/<env>/<region>/pipeline-provisioner-inputs/management-cluster-<mc>.json`**
-  - Consumer: `provision-pipelines.sh` (pipeline-provisioner pipeline)
-  - Trigger: Pipeline provisioner
-  - Contains: `region`, `account_id`, `management_id`, `delete_pipeline`
+  - Consumer: `provision-cluster-resources.sh`
+  - Trigger: Central bootstrap or an explicit provisioner run
+  - Contains: `region`, `account_id`, `management_id`, `platform_image`
 
 - **`deploy/<env>/<region>/pipeline-regional-cluster-inputs/terraform.json`**
-  - Consumer: RC pipeline stages (`provision-infra-rc.sh`, `bootstrap-argocd-rc.sh`, `register.sh`)
-  - Trigger: Regional cluster pipeline
+  - Consumer: RC CodePipeline's CodeBuild action (`provision-infra-rc.sh`, `bootstrap-argocd-rc.sh`, `wait-for-regional-api.sh`)
+  - Trigger: Regional CodePipeline source filter
   - Contains: Terraform variables + `delete` flag
 
 - **`deploy/<env>/<region>/pipeline-management-cluster-<mc>-inputs/terraform.json`**
-  - Consumer: MC pipeline stages (`provision-infra-mc.sh`, `bootstrap-argocd-mc.sh`, `iot-mint.sh`, `register.sh`)
-  - Trigger: Management cluster pipeline
+  - Consumer: MC CodePipeline's CodeBuild action (`provision-infra-mc.sh`, `bootstrap-argocd-mc.sh`)
+  - Trigger: Management CodePipeline source filter
   - Contains: Terraform variables + `delete` flag
 
 - **`deploy/<env>/<region>/argocd-values-<cluster-type>.yaml`**
@@ -110,11 +110,12 @@ Config values prefixed with `ssm:///` are resolved at pipeline runtime from AWS
 Systems Manager Parameter Store. These parameters are **not** managed in this
 repo — they are created by the account-minter in the internal repo.
 
-| Parameter Path                                      | Description                          | Created By                       |
-| --------------------------------------------------- | ------------------------------------ | -------------------------------- |
-| `/infra/<env>/<region>/account_id`                  | Regional cluster AWS account ID      | account-minter                   |
-| `/infra/<env>/<region>/<cluster_prefix>/account_id` | Management cluster AWS account ID    | account-minter                   |
-| `/infra/region-ou-path` _(RC account)_              | AWS Organizations OU path for region | manual (planned: account-minter) |
+| Parameter Path                                          | Description                                                         | Created By     |
+| ------------------------------------------------------- | ------------------------------------------------------------------- | -------------- |
+| `/infra/<env>/<region>/rc/account_id`                   | Regional cluster AWS account ID                                     | account-config |
+| `/infra/<env>/<region>/<cluster_prefix>/account_id`     | Management cluster AWS account ID                                   | account-config |
+| `/infra/<env>/<region>/ou-path` _(RC account)_          | AWS Organizations OU path for region                                | account-config |
+| `/infra/sre-ui-alb/allowed-source-cidrs` _(RC account)_ | JSON array of CIDRs allowed to reach the SRE UI ALB in public mode. | account-config |
 
 If you need to reference a new SSM parameter in config, ensure it is first
 created by the account-minter (or another provisioner in the internal repo),
@@ -146,8 +147,8 @@ terraform_common:
 
 applications:
   regional-cluster:
-    maestro:
-      mqttEndpoint: "xxx.iot.{{ aws_region }}.amazonaws.com"
+    pagerduty:
+      integrationKey: "xxx"
 ```
 
 ### integration/defaults.yaml

@@ -1,0 +1,332 @@
+# =============================================================================
+# ZOA per-VPC Lambda Module Variables
+# =============================================================================
+# This module deploys 2 Lambdas (api + worker) in a target VPC with direct
+# EKS API access. Called once for RC, once per MC.
+#
+# All timeouts and batch sizes are configurable here (Terraform) and are passed
+# to Lambda as environment variables — tunable without code change.
+# =============================================================================
+
+variable "cluster_id" {
+  description = "Unique ID for the target cluster (RC or MC). Used for Lambda naming."
+  type        = string
+}
+
+variable "target_type" {
+  description = "ZOA target type for this Lambda: rc (regional cluster) or mc (management cluster). Passed to the runtime as ZOA_TARGET_TYPE."
+  type        = string
+
+  validation {
+    condition     = contains(["rc", "mc"], var.target_type)
+    error_message = "target_type must be \"rc\" or \"mc\"."
+  }
+}
+
+# --- Container images ---
+
+variable "lambda_image_uri" {
+  description = "ECR image URI for the ZOA Lambda (minimal image from Containerfile.lambda). Use digest for deterministic deploys: <repo>:<tag>@sha256:<hash>"
+  type        = string
+}
+
+variable "job_image_uri" {
+  description = "ECR image URI for async K8s Jobs (full zoa-tools image from Containerfile). Contains zoa-runner + oc/kubectl for TAs that need them."
+  type        = string
+}
+
+# --- VPC attachment ---
+
+variable "private_subnet_ids" {
+  description = "Private subnet IDs in the target VPC for Lambda VPC attachment"
+  type        = list(string)
+}
+
+variable "cluster_security_group_id" {
+  description = "Security group allowing access to EKS API in the target VPC"
+  type        = string
+}
+
+# --- EKS connection (Lambda is NOT a Pod — needs explicit EKS auth config) ---
+
+variable "eks_cluster_endpoint" {
+  description = "Full https:// URL of the EKS API server in this VPC"
+  type        = string
+}
+
+variable "eks_cluster_ca" {
+  description = "Base64-encoded CA certificate for the EKS cluster"
+  type        = string
+}
+
+variable "eks_cluster_name" {
+  description = "EKS cluster name (used for IAM token generation via x-k8s-aws-id header)"
+  type        = string
+}
+
+# --- Data layer (lives in RC account) ---
+
+variable "dynamodb_table_name" {
+  description = "Name of the DynamoDB executions table"
+  type        = string
+}
+
+variable "audit_table_name" {
+  description = "Name of the DynamoDB audit table"
+  type        = string
+}
+
+variable "artifact_bucket_name" {
+  description = "Name of the S3 bucket for TA artifacts"
+  type        = string
+}
+
+variable "artifact_bucket_arn" {
+  description = "ARN of the S3 artifact bucket (for IAM policy)"
+  type        = string
+}
+
+variable "kms_key_arn" {
+  description = "ARN of the KMS key used for encrypting DynamoDB and S3"
+  type        = string
+}
+
+variable "uploader_role_arn" {
+  description = "ARN of the STS uploader role for async Job credentials"
+  type        = string
+}
+
+variable "data_access_role_arn" {
+  description = "ARN of the cross-account data-access role in the RC account. When set, Lambda assumes this role for DynamoDB and S3 operations. Required for MC deployments where tables are in a different account."
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_resource_arn" {
+  description = "ARN of the Seaplane DB resource for IAM database authentication (rds-db:connect). Format: arn:aws:rds-db:region:account:dbuser:cluster-resource-id/username"
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_endpoint" {
+  description = "Seaplane Aurora cluster endpoint (host:port) for IAM auth connections"
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_name" {
+  description = "Seaplane database name"
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_username" {
+  description = "Seaplane database username for IAM auth"
+  type        = string
+  default     = ""
+}
+
+
+# --- Sizing and timeouts ---
+
+variable "lambda_memory_size" {
+  description = "Memory in MB for Lambda functions"
+  type        = number
+  default     = 512
+}
+
+variable "lambda_api_timeout" {
+  description = "API Lambda timeout in seconds. Safety ceiling for sync TA execution + streaming. Per-TA timeouts are enforced in code below this."
+  type        = number
+  default     = 300
+}
+
+variable "lambda_worker_timeout" {
+  description = "Worker Lambda timeout in seconds. Safety ceiling \u2014 real deadlines enforced in code via RECONCILER_DEADLINE_SECONDS and EXECUTION_DEADLINE_SECONDS env vars."
+  type        = number
+  default     = 300
+}
+
+variable "lambda_api_concurrency" {
+  description = "Reserved concurrency for the API Lambda. -1 = unreserved account pool; >= 1 reserves that many executions. 0 disables the function (do not use)."
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = var.lambda_api_concurrency == -1 || var.lambda_api_concurrency >= 1
+    error_message = "lambda_api_concurrency must be -1 (unreserved) or >= 1; 0 disables the Lambda."
+  }
+}
+
+variable "lambda_worker_concurrency" {
+  description = "Reserved concurrency for the Worker Lambda. -1 = unreserved; >= 1 recommended 10 (1 reconciler tick + concurrent TAs). 0 disables the function (do not use)."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.lambda_worker_concurrency == -1 || var.lambda_worker_concurrency >= 1
+    error_message = "lambda_worker_concurrency must be -1 (unreserved) or >= 1; 0 disables the Lambda."
+  }
+}
+
+# --- Code-level deadlines (passed as env vars, tunable without code change) ---
+
+variable "reconciler_deadline_seconds" {
+  description = "Code-level deadline for reconciler/GC paths. If exceeded, code exits cleanly and defers to next tick. Must be < lambda_worker_timeout."
+  type        = number
+  default     = 55
+}
+
+variable "max_batch_per_tick" {
+  description = "Max items processed per reconciler/GC tick. Remaining items deferred to next tick. Prevents timeout under high load."
+  type        = number
+  default     = 30
+}
+
+# --- Application tunables (passed as env vars, tunable without code change) ---
+
+variable "write_cooldown_seconds" {
+  description = "Minimum seconds between write-type TA executions for the same action+target. Prevents rapid repeated mutations."
+  type        = number
+  default     = 300
+}
+
+variable "max_concurrent_per_target" {
+  description = "Max concurrent TA executions per target cluster. Rate-limits parallel operations against a single cluster."
+  type        = number
+  default     = 10
+}
+
+variable "async_scheduling_overhead_seconds" {
+  description = "Extra time added to a TA's timeout when checking async execution deadline. Accounts for GSI eventual consistency + reconciler cadence + Job scheduling. TA authors set TimeoutSeconds for actual execution; this is platform overhead they don't see."
+  type        = number
+  default     = 180
+}
+
+# --- Kubernetes namespace ---
+
+variable "zoa_jobs_namespace" {
+  description = "Kubernetes namespace for ZOA ServiceAccounts, Jobs, and Secrets. Created by this module via the kubernetes provider."
+  type        = string
+  default     = "zoa-jobs"
+}
+
+# --- Application tuning ---
+
+variable "log_level" {
+  description = "Application log level for ZOA Lambda functions (debug, info, warn, error). Tunable without code change."
+  type        = string
+  default     = "info"
+}
+
+variable "dynamodb_ttl_days" {
+  description = "DynamoDB record TTL in days (default 365 for FIPS compliance)"
+  type        = number
+  default     = 365
+}
+
+variable "sessions_table_name" {
+  description = "DynamoDB table name for ZOA boundary sessions. Set when boundary is enabled — required for the reaper (worker) and identity bridge (api)."
+  type        = string
+  default     = ""
+}
+
+variable "session_idle_timeout_seconds" {
+  description = "Idle window (seconds) before the Worker idle reaper stops an active boundary session (SESSION_IDLE_TIMEOUT_SECONDS). Used when sessions_table_name is set. Stale creating uses session_stale_creating_seconds."
+  type        = number
+  default     = 3600
+}
+
+variable "session_stale_creating_seconds" {
+  description = "How long a boundary session may remain in creating before the worker reaper terminates the row (and stops ECS if task_arn is set). Used when sessions_table_name is set."
+  type        = number
+  default     = 900
+
+  validation {
+    condition     = var.session_stale_creating_seconds >= 60 && var.session_stale_creating_seconds <= 86400
+    error_message = "session_stale_creating_seconds must be between 60 and 86400."
+  }
+}
+
+variable "deployment_name" {
+  description = "Deployment name (e.g. us-east-1, us-east-1-eph-abc123). Boundary ECS env; included in RC SSM target JSON when targets_ssm_prefix is set."
+  type        = string
+  default     = ""
+}
+
+variable "targets_ssm_prefix" {
+  description = "RC only: SSM prefix for target registration (e.g. /zoa/targets/us-east-1). MC targets use mc-zoa-target-ssm-provisioning; leave default empty on MC."
+  type        = string
+  default     = ""
+}
+
+variable "vpc_id" {
+  description = "VPC ID for boundary ECS and SSM target metadata."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.vpc_id != ""
+    error_message = "vpc_id is required (boundary ECS and SSM target registration)."
+  }
+}
+
+variable "boundary_image" {
+  description = "Container image for the ZOA boundary ECS task (Konflux/Quay)."
+  type        = string
+
+  validation {
+    condition     = var.boundary_image != ""
+    error_message = "boundary_image must be set; Seaplane always deploys the full ZOA stack."
+  }
+}
+
+variable "access_lambda_role_arn" {
+  description = "ARN of the RC ZOA Access Lambda execution role for boundary trust policies. Required when target_type is mc; ignored on rc (role is created in this module)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      var.target_type == "rc" ||
+      can(regex("^arn:aws:iam::[0-9]{12}:role/", var.access_lambda_role_arn))
+    )
+    error_message = "access_lambda_role_arn must be a valid IAM role ARN when target_type is mc."
+  }
+}
+
+variable "boundary_log_retention_days" {
+  description = "CloudWatch retention for boundary logs. Terraform applies max(365, value) for FedRAMP alignment."
+  type        = number
+  default     = 365
+}
+
+variable "boundary_cpu" {
+  description = "Fargate CPU units for the boundary task (256, 512, 1024, 2048, 4096)."
+  type        = string
+  default     = "512"
+}
+
+variable "boundary_memory" {
+  description = "Fargate memory (MB) for the boundary task."
+  type        = string
+  default     = "1024"
+}
+
+variable "boundary_ecs_exec_interactive_command" {
+  description = "Shell command for ecs:ExecuteCommand on boundary tasks (ZOA_ECS_EXEC_COMMAND)."
+  type        = string
+  default     = "runuser -u sre -- /bin/bash -l"
+}
+
+variable "claude_code_bedrock_primary_model" {
+  description = "ANTHROPIC_MODEL for Claude Code in boundary tasks."
+  type        = string
+  default     = "us.anthropic.claude-sonnet-5"
+}
+
+variable "breakglass_role_arns" {
+  description = "IAM role ARNs the boundary task role may assume for break-glass access."
+  type        = list(string)
+  default     = []
+}

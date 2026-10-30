@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Integration environment CLI for ROSA Regional Platform.
+# Integration environment CLI for ROSA Seaplane.
 #
 # Provides interactive access to the standing integration environment.
 # Uses AWS profiles with SAML authentication.
@@ -8,7 +8,7 @@
 # Typically invoked via Makefile targets (make int-shell, etc.)
 #
 # The script constructs a temporary AWS config with the int profiles.
-# Account IDs default to rosa-regional-platform-internal; override with RRP_ACCOUNTS_INT.
+# Account IDs default to rosa-seaplane-internal; override with RRP_ACCOUNTS_INT.
 
 set -euo pipefail
 
@@ -40,7 +40,7 @@ usage() {
     echo "  bastion         Connect to RC/MC bastion"
     echo "  port-forward    Forward ports through RC/MC bastion"
     echo "  e2e             Run e2e tests"
-    echo "  collect-logs    Collect kubernetes logs from RC/MC"
+    echo "  dump-env        Dump EKS must-gather and DB state from RC/MC"
 }
 
 usage_bastion() {
@@ -59,7 +59,7 @@ usage_port_forward() {
     echo ""
     echo "Flags:"
     echo "  --all              Automatically open all port forwards"
-    echo "  --service <name>   Forward a specific service (maestro, argocd, prometheus)"
+    echo "  --service <name>   Forward a specific service (argocd, prometheus, loki, grafana)"
     echo "  --cluster-type     Cluster type: \"regional\" or \"management\""
 }
 
@@ -81,10 +81,10 @@ profile_for() {
 
 # Create temporary AWS config with int profiles.
 setup_aws_config() {
-    local accounts_file="${RRP_ACCOUNTS_INT:-${REPO_ROOT}/../rosa-regional-platform-internal/infra/accounts/int/accounts.json}"
+    local accounts_file="${RRP_ACCOUNTS_INT:-${REPO_ROOT}/../rosa-seaplane-internal/infra/accounts/int/accounts.json}"
     [[ -f "$accounts_file" ]] \
         || die "Account IDs file not found: $accounts_file
-    Either clone rosa-regional-platform-internal as a sibling directory,
+    Either clone rosa-seaplane-internal as a sibling directory,
     or set RRP_ACCOUNTS_INT to point to your accounts JSON file.
     See docs/development-environment.md for details."
     load_accounts "$accounts_file" central rc mc customer
@@ -170,13 +170,13 @@ cmd_shell() {
         "$CI_IMAGE" \
         bash -c '
             echo ""
-            echo "ROSA Regional Platform — Integration Environment"
+            echo "ROSA Seaplane — Integration Environment"
             echo ""
             echo "Region:      $AWS_DEFAULT_REGION"
             echo "API Gateway: $API_URL"
             echo ""
             echo "Example commands:"
-            echo "  awscurl --service execute-api \$API_URL/v0/live"
+            echo "  awscurl --service execute-api \$API_URL/api/v0/live"
             exec bash'
 }
 
@@ -251,13 +251,12 @@ cmd_port_forward() {
       *) echo "Error: invalid cluster type '${cluster_type:-}'"; echo ""; usage_port_forward; exit 1 ;;
     esac
 
-    local maestro="maestro   - Maestro HTTP + gRPC"
     local argocd="argocd    - ArgoCD server HTTPS"
     local prometheus="prometheus  - Prometheus Monitoring Dashboard"
     local loki="loki      - Loki Query Frontend (platform logs)"
     local grafana="grafana   - Grafana Dashboard"
 
-    local regional_svc_list=("$maestro" "$argocd" "$prometheus" "$loki" "$grafana")
+    local regional_svc_list=("$argocd" "$prometheus" "$loki" "$grafana")
     local management_svc_list=("$argocd" "$prometheus")
 
     local services
@@ -286,18 +285,7 @@ cmd_port_forward() {
     local forwards=()
     for service in $services
     do
-        if [ "$service" = "maestro" ] && [ "$cluster_type" != "regional" ]; then
-            echo "Error: maestro is only available on regional clusters."
-            exit 1
-        fi
-
         case "$service" in
-        maestro)
-            forwards+=(
-            "Maestro-HTTP 8080 8080 maestro-http maestro-server 8080"
-            "Maestro-gRPC 8090 8090 maestro-grpc maestro-server 8090"
-            )
-            ;;
         argocd)
             forwards+=(
             "ArgoCD-Server 8443 8443 argocd-server argocd 443"
@@ -463,7 +451,7 @@ cmd_port_forward() {
 
 cmd_e2e() {
     local e2e_ref="${E2E_REF:-main}"
-    local e2e_repo="${E2E_REPO:-https://github.com/openshift-online/rosa-regional-platform-api.git}"
+    local e2e_repo="${E2E_REPO:-https://github.com/openshift-online/rosa-seaplane-api.git}"
 
     setup_aws_config
     write_int_container_config
@@ -489,7 +477,7 @@ cmd_e2e() {
         bash ci/e2e-tests.sh
 }
 
-cmd_collect_logs() {
+cmd_dump_env() {
     local cluster_type="${1:-all}"
     case "$cluster_type" in
         rc) cluster_type="regional" ;;
@@ -499,8 +487,8 @@ cmd_collect_logs() {
     setup_aws_config
     write_int_container_config
 
-    # collect-cluster-logs.sh runs on the host (not in a container) but needs
-    # the standardized profile names (rrp-rc, rrp-mc). Point it at the resolved
+    # dump-env.sh runs on the host (not in a container) but needs the
+    # standardized profile names (rrp-rc, rrp-mc). Point it at the resolved
     # container config which has those profiles with static credentials.
     export AWS_CONFIG_FILE="$_CONTAINER_CONFIG"
     export AWS_SHARED_CREDENTIALS_FILE=/dev/null
@@ -510,7 +498,7 @@ cmd_collect_logs() {
         export LOG_OUTPUT_DIR="$ARTIFACT_DIR"
     fi
 
-    "${REPO_ROOT}/scripts/dev/collect-cluster-logs.sh" "$cluster_type"
+    "${REPO_ROOT}/scripts/dev/dump-env.sh" "$cluster_type"
 }
 
 # =============================================================================
@@ -520,7 +508,7 @@ cmd_collect_logs() {
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 case "${1:-help}" in
-    bastion|collect-logs)
+    bastion|dump-env)
         for tool in jq uv aws; do
             command -v "$tool" >/dev/null 2>&1 || die "Missing required tool: $tool"
         done
@@ -543,7 +531,7 @@ case "${1:-help}" in
     bastion)        shift; cmd_bastion "$@" ;;
     port-forward)   shift; cmd_port_forward "$@" ;;
     e2e)            cmd_e2e ;;
-    collect-logs)   shift; cmd_collect_logs "$@" ;;
+    dump-env)       shift; cmd_dump_env "$@" ;;
     help|*)
         usage
         ;;

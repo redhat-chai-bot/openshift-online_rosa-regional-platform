@@ -4,7 +4,7 @@
 
 ## Summary
 
-The ROSA Regional Platform logging stack provides centralized log collection from both Regional Clusters (RC) and Management Clusters (MC). It consists of:
+The ROSA Seaplane logging stack provides centralized log collection from both Regional Clusters (RC) and Management Clusters (MC). It consists of:
 
 - **Vector** (DaemonSet) — log collector on RC and MC, deployed via the upstream `vector/vector` Helm chart (v0.52.0)
 - **Loki** (Distributed mode) — log aggregation on RC, deployed via the upstream `grafana/loki` Helm chart (v7.0.0, Loki 3.6.7)
@@ -29,7 +29,7 @@ We evaluated deploying the same stack that RHOBS uses internally:
 
 **Constraints**:
 
-- EKS Auto Mode (no OpenShift operators available)
+- EKS with self-managed Karpenter (no OpenShift operators available)
 - EKS Pod Identity for IAM auth — no static credentials
 - KMS encryption at rest (S3 bucket-level default, transparent to Loki)
 - Minimize locally-maintained operator code
@@ -252,7 +252,7 @@ Three dashboards deployed as ConfigMaps with `grafana_dashboard: "1"` label (sid
 
 - **Vector**: PodMonitor (upstream chart, port `prom-exporter` on 9090) → Prometheus → Thanos
 - **Loki**: ServiceMonitor (upstream chart, port 3100 `/metrics`) → Prometheus → Thanos
-- **E2E tests** (`rosa-regional-platform-api/test/e2e/`):
+- **E2E tests** (`rosa-seaplane-api/test/e2e/`):
   - `logging_test.go` — validates RC and MC logs exist in Loki via API Gateway
   - `observability_test.go` — validates Vector and Loki metrics flow to Thanos via remote-write
 

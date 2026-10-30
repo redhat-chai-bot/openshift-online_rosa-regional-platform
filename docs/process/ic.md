@@ -1,16 +1,16 @@
-# ROSA Regional Platform IC
+# ROSA Seaplane IC
 
-This document describes the ROSA Regional Platform IC (Interrupt Catcher) process.
+This document describes the ROSA Seaplane IC (Interrupt Catcher) process.
 
 ## Overview
 
-The IC is the weekly point person for operational interrupts on the ROSA Regional Platform team. The role aims to keep the underlying infrastructure stable and prevent the team from accruing technical debt.
+The IC is the weekly point person for operational interrupts on the ROSA Seaplane team. The role aims to keep the underlying infrastructure stable and prevent the team from accruing technical debt.
 
 There is no expectation for the IC to be available outside of Business Hours. The IC should review and address their responsibilities at the start of each day.
 
 This role should not prevent the IC from working on their project tasks. The general tasks of the IC should not take more than one hour of your work day. If the workload becomes overwhelming, reach out to the team for help. When the IC asks for help, the entire team should stop what they're doing and help. This is our [Andon Cord](https://www.6sigma.us/six-sigma-in-focus/andon-cord-lean-manufacturing-tps/) ([shorter summary here](https://devlead.io/DevTips/AndonCord)).
 
-The IC is expected to use AI and write automation to reduce the burden on themselves and future ICs. Run `/ic` in Claude Code at the start of each day for an automated briefing covering CI health, the PR queue, and ROSAENG-140 items. Aspirationally, this role should not exist.
+The IC is expected to use AI and write automation to reduce the burden on themselves and future ICs. Run `/ic` in Claude Code at the start of each day for an automated briefing covering CI health, the PR queue, and IC queue items. Aspirationally, this role should not exist.
 
 **Make the next IC's shift easier than yours!**
 
@@ -19,16 +19,15 @@ The IC is expected to use AI and write automation to reduce the burden on themse
 The IC is responsible for the following tasks:
 
 - Ensure that the CI jobs are running correctly, in particular:
-  - [Nightly Ephemeral](https://prow.ci.openshift.org/job-history/gs/test-platform-results/logs/periodic-ci-openshift-online-rosa-regional-platform-main-nightly-ephemeral)
-  - [Nightly Integration](https://prow.ci.openshift.org/job-history/gs/test-platform-results/logs/periodic-ci-openshift-online-rosa-regional-platform-main-nightly-integration)
-  - [On-demand E2E](https://prow.ci.openshift.org/job-history/gs/test-platform-results/pr-logs/directory/pull-ci-openshift-online-rosa-regional-platform-main-on-demand-e2e)
+  - [Nightly Ephemeral](https://prow.ci.openshift.org/job-history/gs/test-platform-results/logs/periodic-ci-openshift-online-rosa-seaplane-main-nightly-ephemeral)
+  - [Nightly Integration](https://prow.ci.openshift.org/job-history/gs/test-platform-results/logs/periodic-ci-openshift-online-rosa-seaplane-main-nightly-integration)
+  - [On-demand E2E](https://prow.ci.openshift.org/job-history/gs/test-platform-results/pr-logs/directory/pull-ci-openshift-online-rosa-seaplane-main-on-demand-e2e)
     - Note that only consistent, platform-level failures are the IC's responsibility, as opposed to one-off failures caused by the PRs being tested
-- Monitor the PR queue via the [PR Dashboard](https://openshift-online.github.io/rosa-regional-platform/pr-dashboard):
-  - Ensure all review-ready PRs have assigned reviewers
-  - Run `/ok-to-test` on bot PRs (dependabot, rosa-regional-platform-ci, rrp-bot) after verifying they are safe
-- Work on items in [ROSAENG-140 - Technical Debt and Continuous Improvement of RRP](https://redhat.atlassian.net/browse/ROSAENG-140).
-  - This Epic should only contain urgent tasks to be addressed during the ongoing week.
-  - Items on this epic should always be down to zero.
+- Monitor the PR queue via the [PR Dashboard](https://openshift-online.github.io/rosa-seaplane/pr-dashboard):
+  - For human PRs: ensure they have an appropriate reviewer assigned — the IC is not expected to review these themselves
+  - For bot/agent PRs (dependabot, Konflux/MintMaker, chai-bot): run `/ok-to-test` after verifying they are safe, then merge or delegate to an appropriate reviewer
+- Work on items in the [ROSA Seaplane IC Queue](https://redhat.atlassian.net/issues?filter=112523).
+  - Items on this queue should always be down to zero.
 
 ## Rotation
 

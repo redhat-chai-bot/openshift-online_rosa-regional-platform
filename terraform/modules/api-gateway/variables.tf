@@ -23,12 +23,12 @@ variable "regional_id" {
 }
 
 variable "node_security_group_id" {
-  description = "EKS node/pod security group ID - ALB needs to send traffic to pods via this SG. For EKS Auto Mode, use the cluster_primary_security_group_id."
+  description = "EKS node/pod security group ID - ALB needs to send traffic to pods via this SG"
   type        = string
 }
 
 variable "cluster_name" {
-  description = "EKS cluster name - required for tagging target group with eks:eks-cluster-name tag for Auto Mode IAM permissions"
+  description = "EKS cluster name - used to tag target groups with eks:eks-cluster-name"
   type        = string
 }
 
@@ -39,7 +39,7 @@ variable "cluster_name" {
 variable "target_port" {
   description = "Port on which the backend service receives traffic"
   type        = number
-  default     = 8080
+  default     = 8000
 
   validation {
     condition     = var.target_port >= 1 && var.target_port <= 65535
@@ -50,7 +50,7 @@ variable "target_port" {
 variable "health_check_path" {
   description = "Path for ALB health checks on the backend service"
   type        = string
-  default     = "/v0/live"
+  default     = "/api/v0/live"
 }
 
 variable "health_check_interval" {
@@ -94,7 +94,7 @@ variable "stage_name" {
 variable "api_description" {
   description = "Description for the API Gateway REST API"
   type        = string
-  default     = "ROSA Regional Platform API"
+  default     = "ROSA Seaplane API"
 }
 
 # =============================================================================

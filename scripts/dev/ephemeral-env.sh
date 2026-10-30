@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Ephemeral environment CLI for ROSA Regional Platform.
+# Ephemeral environment CLI for ROSA Seaplane.
 #
 # Manages ephemeral developer environments in shared dev AWS accounts.
 # Wraps the ephemeral provider (ci/ephemeral-provider/) with credential
@@ -35,15 +35,20 @@ usage() {
     echo ""
     echo "Commands:"
     echo "  provision       Provision an ephemeral environment"
+    echo "  provision-resume Resume a failed provisioning run"
     echo "  teardown        Tear down an ephemeral environment"
     echo "  resync          Resync an ephemeral environment to your branch"
     echo "  swap-branch     Swap an ephemeral environment to a different branch"
     echo "  list            List ephemeral environments"
     echo "  shell           Interactive shell for Platform API access"
+    echo "  post-account    Allowlist a customer AWS account with the RC platform API"
+    echo "  delete-account  Revoke an allowlisted customer AWS account"
     echo "  bastion         Connect to RC/MC bastion in an ephemeral env"
     echo "  port-forward    Forward ports through RC/MC bastion in an ephemeral env"
+    echo "  sre-ui          Tunnel SRE UI tools through the internal ALB via bastion"
     echo "  e2e             Run e2e tests against an ephemeral env"
-    echo "  collect-logs    Collect kubernetes logs from RC/MC in an ephemeral env"
+    echo "  zoa-e2e         Run rosa-seaplane-zoa's deep e2e suite against an ephemeral env"
+    echo "  dump-env        Dump EKS must-gather and DB state from RC/MC in an ephemeral env"
 }
 
 usage_bastion_interactive() {
@@ -102,6 +107,26 @@ update_fields() {
     done
     rm -f "${ENVS_FILE}.tmp.bak"
     mv "${ENVS_FILE}.tmp" "$ENVS_FILE"
+}
+
+# Persist a successful provision and its available outputs as one metadata update.
+record_ready_environment() {
+    local id="$1" region="$2" api_url="$3" rhobs_api_url="$4"
+    local zoa_rc_api_url="$5" zoa_mc_api_url="$6" zoa_deployment_name="$7" eph_branch="$8"
+    local fields=("STATE=ready")
+
+    [[ -z "$region" ]] || fields+=("REGION=$region")
+    [[ -z "$api_url" ]] || fields+=("API_URL=$api_url")
+    [[ -z "$rhobs_api_url" ]] || fields+=("RHOBS_API_URL=$rhobs_api_url")
+    [[ -z "$zoa_rc_api_url" ]] || fields+=("ZOA_RC_API_URL=$zoa_rc_api_url")
+    [[ -z "$zoa_mc_api_url" ]] || fields+=("ZOA_MC_API_URL=$zoa_mc_api_url")
+    [[ -z "$zoa_deployment_name" ]] || fields+=("ZOA_DEPLOYMENT_NAME=$zoa_deployment_name")
+    fields+=("EPH_BRANCH=$eph_branch")
+
+    if ! update_fields "$id" "${fields[@]}"; then
+        update_state "$id" "provisioning-failed" || true
+        die "Unable to persist successful provisioning metadata for ID $id"
+    fi
 }
 
 # Derive the ephemeral branch name from an env ID and branch name.
@@ -188,19 +213,24 @@ setup_override_mount() {
     fi
 }
 
-# Fetch GitHub token from Secrets Manager (unless already set).
+# Fetch GitHub token from SSM Parameter Store (unless already set).
 # Requires rrp-ephemeral-central profile to be available.
 fetch_github_token() {
-    if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    SEAPLANE_CI_GITHUB_TOKEN="${SEAPLANE_CI_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -z "${SEAPLANE_CI_GITHUB_TOKEN:-}" ]]; then
         echo "Fetching GitHub token from SSM Parameter Store..."
-        GITHUB_TOKEN=$(aws ssm get-parameter \
+        local ssm_err
+        ssm_err=$(mktemp)
+        SEAPLANE_CI_GITHUB_TOKEN=$(aws ssm get-parameter \
             --name "$GITHUB_TOKEN_SECRET" \
             --with-decryption \
             --profile rrp-ephemeral-central \
-            --query Parameter.Value --output text 2>/dev/null) \
-            || die "Failed to fetch GitHub token from SSM."
+            --query Parameter.Value --output text 2>"$ssm_err") \
+            || die "Failed to fetch GitHub token from SSM.
+$(cat "$ssm_err")"
+        rm -f "$ssm_err"
     fi
-    export GITHUB_TOKEN
+    export SEAPLANE_CI_GITHUB_TOKEN
 }
 
 # Create temporary AWS config with ephemeral profiles.
@@ -211,10 +241,10 @@ setup_aws_config() {
         return 0
     fi
 
-    local accounts_file="${RRP_ACCOUNTS_DEV:-${REPO_ROOT}/../rosa-regional-platform-internal/infra/accounts/dev/accounts.json}"
+    local accounts_file="${RRP_ACCOUNTS_DEV:-${REPO_ROOT}/../rosa-seaplane-internal/infra/accounts/dev/accounts.json}"
     [[ -f "$accounts_file" ]] \
         || die "Account IDs file not found: $accounts_file
-    Either clone rosa-regional-platform-internal as a sibling directory,
+    Either clone rosa-seaplane-internal as a sibling directory,
     or set RRP_ACCOUNTS_DEV to point to your accounts JSON file.
     See docs/development-environment.md for details."
     load_accounts "$accounts_file" admin central rc mc customer
@@ -260,7 +290,7 @@ write_eph_container_config() {
     # If profiles are preset, mount the whole .aws dir — config, cred-helper,
     # and real_credentials all need to be present at the same absolute paths.
     if [[ -n "${RRP_AWS_PROFILES_PRESET:-}" ]]; then
-        _CONTAINER_AWS_FLAGS="-v ${HOME}/.aws:/home/agent/.aws:ro,z -e AWS_CONFIG_FILE=/home/agent/.aws/config"
+        _CONTAINER_AWS_FLAGS="-v ${HOME}/.aws:/home/agent/.aws:ro,z -e AWS_CONFIG_FILE=/home/agent/.aws/config $(container_aws_role_session_name_flags)"
         # Pass through TLS env vars if set in the caller's environment
         for _var in AWS_CA_BUNDLE REQUESTS_CA_BUNDLE SSL_CERT_FILE UV_NATIVE_TLS; do
             [[ -n "${!_var:-}" ]] && _CONTAINER_AWS_FLAGS="${_CONTAINER_AWS_FLAGS} -e ${_var}=${!_var}"
@@ -348,7 +378,8 @@ preflight() {
 # =============================================================================
 
 cmd_provision() {
-    local repo="${REPO:-openshift-online/rosa-regional-platform}"
+    local command_start=$SECONDS
+    local repo="${REPO:-openshift-online/rosa-seaplane}"
     local branch="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 
     # Generate an ID if not provided
@@ -388,27 +419,37 @@ cmd_provision() {
         >> "$ENVS_FILE"
 
     # Run the ephemeral provider
-    local tmpdir
+    local tmpdir artifacts_dir
     tmpdir=$(mktemp -d)
+    artifacts_dir="${ARTIFACTS_DIR:-${ARTIFACT_DIR:-${REPO_ROOT}/.ephemeral-artifacts/${ID}}}"
+    mkdir -p "$artifacts_dir"
     _prev_trap=$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")
     trap 'rm -rf "${tmpdir:-}"; eval "$_prev_trap"' EXIT
+
+    echo "  ARTIFACTS_DIR:     $artifacts_dir"
 
     local rc=0
     # shellcheck disable=SC2086
     $CONTAINER_ENGINE run --rm \
         $_CONTAINER_AWS_FLAGS \
-        -e "GITHUB_TOKEN=$GITHUB_TOKEN" \
+        -e "SEAPLANE_CI_GITHUB_TOKEN=$SEAPLANE_CI_GITHUB_TOKEN" \
         $OVERRIDE_MOUNT \
         -v "${REPO_ROOT}:/workspace:ro,z" \
         -v "${tmpdir}:/output:z" \
+        -v "${artifacts_dir}:/artifacts:z" \
         -w /workspace \
         -e WORKSPACE_DIR=/workspace \
+        -e ARTIFACT_DIR=/artifacts \
         "$CI_IMAGE" \
         uv run --no-cache ci/ephemeral-provider/main.py \
             --id "$ID" \
             --repo "$repo" --branch "$branch" \
             --save-regional-state /output/tf-outputs.json \
+            --save-management-state /output/tf-outputs-mc.json \
     || rc=$?
+
+    local command_elapsed=$((SECONDS - command_start))
+    echo "Total provisioning command duration: $((command_elapsed / 60))m $((command_elapsed % 60))s"
 
     # Record results
     if [[ $rc -eq 0 ]]; then
@@ -425,17 +466,25 @@ cmd_provision() {
             rhobs_api_url=$(jq -r '.rhobs_api_url.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
         fi
 
-        update_state "$ID" "ready"
-        [[ -z "$region" ]]  || append_field "$ID" "REGION" "$region"
-        [[ -z "$api_url" ]] || append_field "$ID" "API_URL" "$api_url"
-        [[ -z "$rhobs_api_url" ]] || append_field "$ID" "RHOBS_API_URL" "$rhobs_api_url"
-
+        local zoa_rc_api_url="" zoa_mc_api_url="" zoa_deployment_name=""
+        if [[ -f "$tmpdir/tf-outputs.json" ]]; then
+            zoa_rc_api_url=$(jq -r '.zoa_api_function_url.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
+            zoa_deployment_name=$(jq -r '.deployment_name.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
+        fi
+        if [[ -f "$tmpdir/tf-outputs-mc.json" ]]; then
+            zoa_mc_api_url=$(jq -r '.zoa_api_function_url.value // empty' "$tmpdir/tf-outputs-mc.json" 2>/dev/null || true)
+        fi
         # Store ephemeral branch name so it survives branch swaps
-        append_field "$ID" "EPH_BRANCH" "$(derive_eph_branch "$ID" "$branch")"
+        record_ready_environment \
+            "$ID" "$region" "$api_url" "$rhobs_api_url" \
+            "$zoa_rc_api_url" "$zoa_mc_api_url" "$zoa_deployment_name" \
+            "$(derive_eph_branch "$ID" "$branch")"
 
         echo ""
         echo "Environment recorded in $ENVS_FILE."
         [[ -z "$api_url" ]] || echo -e "\n  API Gateway:  $api_url"
+        [[ -z "$zoa_rc_api_url" ]] || echo -e "  ZOA API (RC): $zoa_rc_api_url"
+        [[ -z "$zoa_mc_api_url" ]] || echo -e "  ZOA API (MC): $zoa_mc_api_url"
         echo ""
         echo "  To interact with the API:"
         echo "    make ephemeral-shell ID=$ID"
@@ -448,11 +497,134 @@ cmd_provision() {
     else
         update_state "$ID" "provisioning-failed"
         echo "Provisioning failed. State updated to provisioning-failed."
+        echo "CodeBuild logs (if captured): $artifacts_dir"
+        echo "Fix the failure, then retry:"
+        echo "  make ephemeral-provision-resume ID=$ID"
+        exit $rc
+    fi
+}
+
+cmd_provision_resume() {
+    local command_start=$SECONDS
+    select_env "STATE=provisioning-failed" \
+        "Select failed environment to resume:" \
+        "No failed provisioning environments found."
+
+    local repo branch eph_branch
+    repo=$(get_field "$ENV_LINE" REPO)
+    branch=$(get_field "$ENV_LINE" BRANCH)
+    eph_branch=$(get_field "$ENV_LINE" EPH_BRANCH)
+    local state
+    state=$(get_field "$ENV_LINE" STATE)
+
+    [[ "$state" == "provisioning-failed" ]] \
+        || die "Environment $BUILD_ID is in state '$state'; only provisioning-failed environments can be resumed."
+    [[ -n "$repo" ]] || die "Environment $BUILD_ID has no REPO field."
+    [[ -n "$branch" ]] || die "Environment $BUILD_ID has no BRANCH field."
+    [[ -n "$eph_branch" ]] || eph_branch=$(derive_eph_branch "$BUILD_ID" "$branch")
+
+    setup_override_mount
+    setup_aws_config
+    fetch_github_token
+    write_eph_container_config
+
+    echo "Resuming ephemeral environment provisioning..."
+    echo "  ID:                $BUILD_ID"
+    echo "  REPO:              $repo"
+    echo "  BRANCH:            $branch"
+    echo "  EPH_BRANCH:        $eph_branch"
+    echo "  CONTAINER_ENGINE:  $CONTAINER_ENGINE"
+    echo "  IMAGE:             $CI_IMAGE"
+
+    local tmpdir artifacts_dir
+    tmpdir=$(mktemp -d)
+    artifacts_dir="${ARTIFACTS_DIR:-${ARTIFACT_DIR:-${REPO_ROOT}/.ephemeral-artifacts/${BUILD_ID}}}"
+    mkdir -p "$artifacts_dir"
+    _prev_trap=$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")
+    trap 'rm -rf "${tmpdir:-}"; eval "$_prev_trap"' EXIT
+
+    echo "  ARTIFACTS_DIR:     $artifacts_dir"
+
+    local rc=0
+    local resync_arg=()
+    case "${RESYNC:-true}" in
+        true|1|yes|TRUE|YES)
+            resync_arg=(--resync-before-resume)
+            ;;
+        false|0|no|FALSE|NO)
+            ;;
+        *)
+            die "RESYNC must be true or false (got: ${RESYNC})"
+            ;;
+    esac
+
+    update_state "$BUILD_ID" "provisioning"
+
+    # shellcheck disable=SC2086
+    $CONTAINER_ENGINE run --rm \
+        $_CONTAINER_AWS_FLAGS \
+        -e "SEAPLANE_CI_GITHUB_TOKEN=$SEAPLANE_CI_GITHUB_TOKEN" \
+        $OVERRIDE_MOUNT \
+        -v "${REPO_ROOT}:/workspace:ro,z" \
+        -v "${tmpdir}:/output:z" \
+        -v "${artifacts_dir}:/artifacts:z" \
+        -w /workspace \
+        -e WORKSPACE_DIR=/workspace \
+        -e ARTIFACT_DIR=/artifacts \
+        "$CI_IMAGE" \
+        uv run --no-cache ci/ephemeral-provider/main.py \
+            --resume \
+            ${resync_arg[@]+"${resync_arg[@]}"} \
+            --id "$BUILD_ID" \
+            --repo "$repo" --branch "$branch" \
+            --eph-branch "$eph_branch" \
+            --save-regional-state /output/tf-outputs.json \
+            --save-management-state /output/tf-outputs-mc.json \
+    || rc=$?
+
+    local command_elapsed=$((SECONDS - command_start))
+    echo "Total provisioning-resume command duration: $((command_elapsed / 60))m $((command_elapsed % 60))s"
+
+    if [[ $rc -eq 0 ]]; then
+        local api_url="" region=""
+        if [[ -f "$tmpdir/tf-outputs.json" ]] && command -v jq >/dev/null 2>&1; then
+            api_url=$(jq -r '.api_gateway_invoke_url.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
+        fi
+        if [[ -f "$tmpdir/region" ]]; then
+            region=$(cat "$tmpdir/region")
+        fi
+
+        local rhobs_api_url=""
+        if [[ -f "$tmpdir/tf-outputs.json" ]]; then
+            rhobs_api_url=$(jq -r '.rhobs_api_url.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
+        fi
+
+        local zoa_rc_api_url="" zoa_mc_api_url="" zoa_deployment_name=""
+        if [[ -f "$tmpdir/tf-outputs.json" ]]; then
+            zoa_rc_api_url=$(jq -r '.zoa_api_function_url.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
+            zoa_deployment_name=$(jq -r '.deployment_name.value // empty' "$tmpdir/tf-outputs.json" 2>/dev/null || true)
+        fi
+        if [[ -f "$tmpdir/tf-outputs-mc.json" ]]; then
+            zoa_mc_api_url=$(jq -r '.zoa_api_function_url.value // empty' "$tmpdir/tf-outputs-mc.json" 2>/dev/null || true)
+        fi
+        record_ready_environment \
+            "$BUILD_ID" "$region" "$api_url" "$rhobs_api_url" \
+            "$zoa_rc_api_url" "$zoa_mc_api_url" "$zoa_deployment_name" "$eph_branch"
+        echo "Environment $BUILD_ID provisioning resumed successfully."
+    else
+        update_state "$BUILD_ID" "provisioning-failed"
+        echo "Resume failed. State updated to provisioning-failed."
+        echo "CodeBuild logs (if captured): $artifacts_dir"
+        echo "Fix the failure, then retry:"
+        echo "  make ephemeral-provision-resume ID=$BUILD_ID"
         exit $rc
     fi
 }
 
 cmd_teardown() {
+    local with_resync=false
+    [[ "${RESYNC:-}" == "1" ]] && with_resync=true
+
     # Select environment
     select_env "STATE=(provisioning|ready|provisioning-failed|deprovisioning|deprovisioning-failed)" \
         "Select environment to tear down:" \
@@ -464,6 +636,8 @@ cmd_teardown() {
     region=$(get_field "$ENV_LINE" REGION)
     eph_branch=$(get_field "$ENV_LINE" EPH_BRANCH)
 
+    setup_override_mount
+
     # Fetch credentials and write container config
     setup_aws_config
     fetch_github_token
@@ -473,14 +647,27 @@ cmd_teardown() {
     local eph_branch_flag=""
     [[ -z "$eph_branch" ]] || eph_branch_flag="--eph-branch $eph_branch"
 
+    local with_resync_flag=""
+    [[ "$with_resync" == "true" ]] && with_resync_flag="--resync"
+
+    # Set up artifacts directory for CodeBuild logs
+    local artifacts_dir
+    artifacts_dir="${ARTIFACTS_DIR:-${ARTIFACT_DIR:-${REPO_ROOT}/.ephemeral-artifacts/${BUILD_ID}}}"
+    mkdir -p "$artifacts_dir"
+
     # Print summary
     echo "Tearing down ephemeral environment..."
     echo "  ID:                $BUILD_ID"
     echo "  REPO:              $repo"
     echo "  BRANCH:            $branch"
+    echo "  RESYNC:            $with_resync"
+    if [[ "$with_resync" == "true" ]]; then
+        echo "  ENV CONFIG:        $OVERRIDE_INFO"
+    fi
     echo "  REGION:            $region"
     echo "  CONTAINER_ENGINE:  $CONTAINER_ENGINE"
     echo "  IMAGE:             $CI_IMAGE"
+    echo "  ARTIFACTS_DIR:     $artifacts_dir"
 
     # Run teardown
     update_state "$BUILD_ID" "deprovisioning"
@@ -489,13 +676,16 @@ cmd_teardown() {
     # shellcheck disable=SC2086
     $CONTAINER_ENGINE run --rm \
         $_CONTAINER_AWS_FLAGS \
-        -e "GITHUB_TOKEN=$GITHUB_TOKEN" \
+        -e "SEAPLANE_CI_GITHUB_TOKEN=$SEAPLANE_CI_GITHUB_TOKEN" \
+        $OVERRIDE_MOUNT \
         -v "${REPO_ROOT}:/workspace:ro,z" \
+        -v "${artifacts_dir}:/artifacts:z" \
         -w /workspace \
         -e WORKSPACE_DIR=/workspace \
+        -e ARTIFACT_DIR=/artifacts \
         "$CI_IMAGE" \
         uv run --no-cache ci/ephemeral-provider/main.py \
-            --teardown --id "$BUILD_ID" --repo "$repo" --branch "$branch" \
+            --teardown $with_resync_flag --id "$BUILD_ID" --repo "$repo" --branch "$branch" \
             $eph_branch_flag \
     || rc=$?
 
@@ -533,6 +723,11 @@ cmd_resync() {
     local eph_branch_flag=""
     [[ -z "$eph_branch" ]] || eph_branch_flag="--eph-branch $eph_branch"
 
+    # Set up artifacts directory for CodeBuild logs
+    local artifacts_dir
+    artifacts_dir="${ARTIFACTS_DIR:-${ARTIFACT_DIR:-${REPO_ROOT}/.ephemeral-artifacts/${BUILD_ID}}}"
+    mkdir -p "$artifacts_dir"
+
     # Print summary
     echo "Resyncing ephemeral environment..."
     echo "  ID:                $BUILD_ID"
@@ -541,16 +736,19 @@ cmd_resync() {
     echo "  ENV CONFIG:        $OVERRIDE_INFO"
     echo "  CONTAINER_ENGINE:  $CONTAINER_ENGINE"
     echo "  IMAGE:             $CI_IMAGE"
+    echo "  ARTIFACTS_DIR:     $artifacts_dir"
 
     # Run resync
     # shellcheck disable=SC2086
     $CONTAINER_ENGINE run --rm \
         $_CONTAINER_AWS_FLAGS \
-        -e "GITHUB_TOKEN=$GITHUB_TOKEN" \
+        -e "SEAPLANE_CI_GITHUB_TOKEN=$SEAPLANE_CI_GITHUB_TOKEN" \
         $OVERRIDE_MOUNT \
         -v "${REPO_ROOT}:/workspace:ro,z" \
+        -v "${artifacts_dir}:/artifacts:z" \
         -w /workspace \
         -e WORKSPACE_DIR=/workspace \
+        -e ARTIFACT_DIR=/artifacts \
         "$CI_IMAGE" \
         uv run --no-cache ci/ephemeral-provider/main.py \
             --resync --id "$BUILD_ID" --repo "$repo" --branch "$branch" \
@@ -638,8 +836,11 @@ cmd_list() {
     echo "To clear list: rm $ENVS_FILE"
 }
 
-cmd_shell() {
-    # Select environment (ready only)
+# Allowlist (POST) or revoke (DELETE) a customer account as the RC account, the only caller the API accepts.
+cmd_account_allowlist() {
+    local method="$1"
+    [[ "${ACCOUNT_ID:-}" =~ ^[0-9]{12}$ ]] || die "ACCOUNT_ID must be a 12-digit AWS account ID"
+
     select_env "STATE=ready" \
         "Select environment:" \
         "No ready environments found." \
@@ -648,6 +849,38 @@ cmd_shell() {
     local api_url region
     api_url=$(get_field "$ENV_LINE" API_URL)
     region=$(get_field "$ENV_LINE" REGION)
+
+    setup_aws_config
+    write_eph_container_config
+
+    local request=(-X DELETE "$api_url/api/v0/accounts/$ACCOUNT_ID")
+    if [[ "$method" == "POST" ]]; then
+        request=(-X POST -H "Content-Type: application/json" -d "{\"accountId\":\"$ACCOUNT_ID\"}" "$api_url/api/v0/accounts")
+    fi
+
+    # shellcheck disable=SC2086
+    $CONTAINER_ENGINE run --rm \
+        $_CONTAINER_AWS_FLAGS \
+        -e "AWS_PROFILE=rrp-rc" \
+        -e "AWS_DEFAULT_REGION=$region" \
+        -e "AWS_REGION=$region" \
+        "$CI_IMAGE" \
+        awscurl --service execute-api --fail-with-body "${request[@]}"
+    echo "==> $method account $ACCOUNT_ID: done"
+}
+
+cmd_shell() {
+    # Select environment (ready only)
+    select_env "STATE=ready" \
+        "Select environment:" \
+        "No ready environments found." \
+        true
+
+    local api_url region zoa_rc_api_url zoa_mc_api_url
+    api_url=$(get_field "$ENV_LINE" API_URL)
+    region=$(get_field "$ENV_LINE" REGION)
+    zoa_rc_api_url=$(get_field "$ENV_LINE" ZOA_RC_API_URL)
+    zoa_mc_api_url=$(get_field "$ENV_LINE" ZOA_MC_API_URL)
 
     # Fetch credentials and write container config
     setup_aws_config
@@ -661,16 +894,20 @@ cmd_shell() {
         -e "AWS_DEFAULT_REGION=$region" \
         -e "AWS_REGION=$region" \
         -e "API_URL=$api_url" \
+        -e "ZOA_RC_API_URL=${zoa_rc_api_url:-}" \
+        -e "ZOA_MC_API_URL=${zoa_mc_api_url:-}" \
         "$CI_IMAGE" \
         bash -c '
             echo ""
-            echo "ROSA Regional Platform shell"
+            echo "ROSA Seaplane shell"
             echo ""
             echo "API Gateway: $API_URL"
+            [[ -z "${ZOA_RC_API_URL:-}" ]] || echo "ZOA API (RC): $ZOA_RC_API_URL"
+            [[ -z "${ZOA_MC_API_URL:-}" ]] || echo "ZOA API (MC): $ZOA_MC_API_URL"
             echo "Region:      $AWS_DEFAULT_REGION"
             echo ""
             echo "Example commands:"
-            echo "  awscurl --service execute-api $API_URL/v0/live"
+            echo "  awscurl --service execute-api $API_URL/api/v0/live"
             exec bash'
 }
 
@@ -745,7 +982,6 @@ cmd_bastion_port_forward() {
       *) echo "Error: invalid cluster type '$cluster_type'"; echo ""; usage_port_forward; exit 1 ;;
     esac
 
-    local maestro="maestro       - Maestro HTTP + gRPC"
     local argocd="argocd        - ArgoCD server HTTPS"
     local prometheus="prometheus    - Prometheus Monitoring Dashboard"
     local thanos="thanos        - Thanos Query + Ruler (aggregated RC+MC metrics and alerting)"
@@ -755,7 +991,7 @@ cmd_bastion_port_forward() {
     local custom="custom        - Custom service / ports"
 
     # custom services are added only for interactive
-    local regional_svc_list=("$maestro" "$argocd" "$prometheus" "$thanos" "$loki" "$alertmanager" "$grafana")
+    local regional_svc_list=("$argocd" "$prometheus" "$thanos" "$loki" "$alertmanager" "$grafana")
     local management_svc_list=("$argocd" "$prometheus")
 
     local services
@@ -779,21 +1015,10 @@ cmd_bastion_port_forward() {
     local forwards=()
     for service in $services
     do
-        if [ "$service" = "maestro" ] && [ "$cluster_type" != "regional" ]; then
-            echo "Error: maestro is only available on regional clusters."
-            exit 1
-        fi
-
         # ── Build port-forward definitions ───────────────────────────────────────────
         # Each entry: "label remote_port local_port k8s_svc k8s_namespace k8s_svc_port"
 
         case "$service" in
-        maestro)
-            forwards+=(
-            "Maestro-HTTP 8080 8080 maestro-http maestro-server 8080"
-            "Maestro-gRPC 8090 8090 maestro-grpc maestro-server 8090"
-            )
-            ;;
         argocd)
             forwards+=(
             "ArgoCD-Server 8443 8443 argocd-server argocd 443"
@@ -885,8 +1110,6 @@ cmd_bastion_port_forward() {
     ssm_pids=()
     bastion_pids=()
 
-    # Chain with the existing EXIT trap (setup_aws_config cleanup)
-    _prev_trap=$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")
     cleanup() {
     echo ""
     echo "Stopping all port-forward sessions..."
@@ -897,9 +1120,8 @@ cmd_bastion_port_forward() {
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
-    eval "$_prev_trap"
     }
-    trap cleanup EXIT
+    chain_exit_trap cleanup
 
     target="ecs:${ecs_cluster}_${task_id}_${runtime_id}"
 
@@ -994,18 +1216,25 @@ cmd_bastion_port_forward() {
 
 cmd_e2e() {
     local e2e_ref="${E2E_REF:-main}"
-    local e2e_repo="${E2E_REPO:-https://github.com/openshift-online/rosa-regional-platform-api.git}"
+    local e2e_repo="${E2E_REPO:-https://github.com/openshift-online/rosa-seaplane-api.git}"
 
     # Select environment (ready only)
     select_env "STATE=ready" \
         "Select environment for e2e tests:" \
         "No ready environments found."
 
-    local api_url region
+    local api_url region zoa_rc_api_url zoa_mc_api_url zoa_deployment_name
     api_url=$(get_field "$ENV_LINE" API_URL)
     region=$(get_field "$ENV_LINE" REGION)
+    zoa_rc_api_url=$(get_field "$ENV_LINE" ZOA_RC_API_URL)
+    zoa_mc_api_url=$(get_field "$ENV_LINE" ZOA_MC_API_URL)
+    zoa_deployment_name=$(get_field "$ENV_LINE" ZOA_DEPLOYMENT_NAME)
     [[ -n "$api_url" ]] \
         || die "No API_URL found for ID $BUILD_ID. Was it captured during provision?"
+    [[ -n "$zoa_rc_api_url" ]] \
+        || die "No ZOA_RC_API_URL found for ID $BUILD_ID. Was it captured during provision?"
+    [[ -n "$zoa_mc_api_url" ]] \
+        || die "No ZOA_MC_API_URL found for ID $BUILD_ID. Was it captured during provision?"
 
     # Fetch credentials and write container config
     setup_aws_config
@@ -1013,12 +1242,19 @@ cmd_e2e() {
 
     local rhobs_api_url
     rhobs_api_url=$(get_field "$ENV_LINE" RHOBS_API_URL)
+    [[ -n "$rhobs_api_url" ]] \
+        || die "No RHOBS_API_URL found for ID $BUILD_ID. Was it captured during provision?"
+    [[ -n "$zoa_deployment_name" ]] \
+        || die "No ZOA_DEPLOYMENT_NAME found for ID $BUILD_ID. Was it captured during provision?"
 
     # Run tests
     echo "Running e2e tests..."
     echo "  ID:             $BUILD_ID"
     echo "  API_URL:        $api_url"
-    echo "  RHOBS_API_URL:  ${rhobs_api_url:-<not set>}"
+    echo "  RHOBS_API_URL:  $rhobs_api_url"
+    echo "  ZOA_RC_API_URL: $zoa_rc_api_url"
+    echo "  ZOA_MC_API_URL: $zoa_mc_api_url"
+    echo "  ZOA_DEPLOYMENT_NAME: $zoa_deployment_name"
     echo "  REGION:         $region"
     echo "  E2E_REF:        $e2e_ref"
     echo "  E2E_REPO:       $e2e_repo"
@@ -1027,18 +1263,89 @@ cmd_e2e() {
         $_CONTAINER_AWS_FLAGS \
         -v "${REPO_ROOT}:/workspace:ro,z" \
         -w /workspace \
+        -e "CLUSTER_PREFIX=eph-${BUILD_ID}-" \
         -e "BUILD_ID=$BUILD_ID" \
         -e "BASE_URL=$api_url" \
-        -e "RHOBS_API_URL=${rhobs_api_url:-}" \
+        -e "RHOBS_API_URL=$rhobs_api_url" \
+        -e "ZOA_RC_API_URL=$zoa_rc_api_url" \
+        -e "ZOA_MC_API_URL=$zoa_mc_api_url" \
+        -e "ZOA_DEPLOYMENT_NAME=$zoa_deployment_name" \
         -e "AWS_DEFAULT_REGION=$region" \
         -e "AWS_REGION=$region" \
         -e "E2E_REF=$e2e_ref" \
         -e "E2E_REPO=$e2e_repo" \
+        -e "CLI_REF=${CLI_REF:-main}" \
+        -e "CLI_REPO=${CLI_REPO:-}" \
+        -e "ROSA_REPO_URL=${ROSA_REPO_URL:-}" \
+        -e "ROSA_REPO_BRANCH=${ROSA_REPO_BRANCH:-}" \
+        -e "ROSA_LABEL_FILTER=${ROSA_LABEL_FILTER:-}" \
+        -e "ROSA_TEST_PROFILE=${ROSA_TEST_PROFILE:-}" \
+        -e "E2E_SKIP_CLEANUP=${E2E_SKIP_CLEANUP:-}" \
+        -e "E2E_SKIP_PLATFORM_API=${E2E_SKIP_PLATFORM_API:-}" \
+        -e "E2E_SKIP_HCP=${E2E_SKIP_HCP:-}" \
+        -e "E2E_SKIP_MONITORING=${E2E_SKIP_MONITORING:-}" \
+        -e "E2E_SKIP_ROSA_CLI=${E2E_SKIP_ROSA_CLI:-}" \
+        -e "E2E_SKIP_ZOA=${E2E_SKIP_ZOA:-}" \
         "$CI_IMAGE" \
         bash ci/e2e-tests.sh
 }
 
-cmd_collect_logs() {
+# Runs rosa-seaplane-zoa e2e tests against an already-provisioned ephemeral
+# env's ZOA Lambda URLs. Clones ZOA_REPO@ZOA_REF inside the container and runs
+# `make $ZOA_MAKE_TARGET` (default: test-e2e; set to test-e2e-smoke for smoke).
+# Same clone-by-ref pattern cmd_e2e uses for rosa-seaplane-api. To test a
+# branch/fork, push it and set ZOA_REF/ZOA_REPO.
+cmd_zoa_e2e() {
+    local zoa_ref="${ZOA_REF:-main}"
+    local zoa_repo="${ZOA_REPO:-https://github.com/openshift-online/rosa-seaplane-zoa.git}"
+
+    select_env "STATE=ready" \
+        "Select environment for ZOA e2e tests:" \
+        "No ready environments found."
+
+    local zoa_rc_api_url zoa_mc_api_url region rhobs_api_url zoa_deployment_name
+    zoa_rc_api_url=$(get_field "$ENV_LINE" ZOA_RC_API_URL)
+    zoa_mc_api_url=$(get_field "$ENV_LINE" ZOA_MC_API_URL)
+    region=$(get_field "$ENV_LINE" REGION)
+    rhobs_api_url=$(get_field "$ENV_LINE" RHOBS_API_URL)
+    zoa_deployment_name=$(get_field "$ENV_LINE" ZOA_DEPLOYMENT_NAME)
+    [[ -n "$zoa_rc_api_url" ]] \
+        || die "No ZOA_RC_API_URL found for ID $BUILD_ID. Was it captured during provision?"
+    [[ -n "$zoa_mc_api_url" ]] \
+        || die "No ZOA_MC_API_URL found for ID $BUILD_ID. Was it captured during provision?"
+    [[ -n "$rhobs_api_url" ]] \
+        || die "No RHOBS_API_URL found for ID $BUILD_ID. Was it captured during provision?"
+    [[ -n "$zoa_deployment_name" ]] \
+        || die "No ZOA_DEPLOYMENT_NAME found for ID $BUILD_ID. Was it captured during provision?"
+
+    setup_aws_config
+    write_eph_container_config
+
+    echo "Running zoa e2e suite..."
+    echo "  ID:             $BUILD_ID"
+    echo "  ZOA_RC_API_URL: $zoa_rc_api_url"
+    echo "  ZOA_MC_API_URL: $zoa_mc_api_url"
+    echo "  RHOBS_API_URL:  $rhobs_api_url"
+    echo "  ZOA_DEPLOYMENT_NAME: $zoa_deployment_name"
+    echo "  REGION:         $region"
+    echo "  ZOA_REF:        $zoa_ref"
+    echo "  ZOA_REPO:       $zoa_repo"
+
+    $CONTAINER_ENGINE run --rm \
+        $_CONTAINER_AWS_FLAGS \
+        -e "ZOA_DEPLOYMENT_NAME=$zoa_deployment_name" \
+        -e "ZOA_RC_API_URL=$zoa_rc_api_url" \
+        -e "ZOA_MC_API_URL=$zoa_mc_api_url" \
+        -e "RHOBS_API_URL=$rhobs_api_url" \
+        -e "AWS_DEFAULT_REGION=$region" \
+        -e "AWS_REGION=$region" \
+        -e "ZOA_MAKE_TARGET=${ZOA_MAKE_TARGET:-test-e2e}" \
+        -e "GINKGO_FLAGS=${GINKGO_FLAGS:-}" \
+        "$CI_IMAGE" \
+        bash -c 'git clone --depth 1 --branch "'"${zoa_ref}"'" "'"${zoa_repo}"'" /tmp/zoa-e2e && cd /tmp/zoa-e2e && make ${ZOA_MAKE_TARGET} GINKGO_FLAGS="${GINKGO_FLAGS:-}"'
+}
+
+cmd_dump_env() {
     local cluster_type="${1:-all}"
     # Accept short aliases
     case "$cluster_type" in
@@ -1047,7 +1354,7 @@ cmd_collect_logs() {
     esac
     # Select environment (ready only)
     select_env "STATE=ready" \
-        "Select environment for log collection:" \
+        "Select environment for dump-env:" \
         "No ready environments found." \
         true
 
@@ -1060,7 +1367,7 @@ cmd_collect_logs() {
     local eph_prefix
     eph_prefix="eph-${BUILD_ID}-"
 
-    # collect-cluster-logs.sh runs on the host (not in a container) but needs
+    # dump-env.sh runs on the host (not in a container) but needs
     # the standardized profile names (rrp-rc, rrp-mc). Point it at the resolved
     # container config which has those profiles with static credentials.
     export AWS_CONFIG_FILE="$_CONTAINER_CONFIG"
@@ -1071,7 +1378,7 @@ cmd_collect_logs() {
         export LOG_OUTPUT_DIR="$ARTIFACT_DIR"
     fi
 
-    "${REPO_ROOT}/scripts/dev/collect-cluster-logs.sh" "$cluster_type"
+    "${REPO_ROOT}/scripts/dev/dump-env.sh" "$cluster_type"
 }
 
 # =============================================================================
@@ -1085,8 +1392,72 @@ case "${1:-help}" in
     list) cmd_list; exit 0 ;;
 esac
 
+cmd_sre_tunnel() {
+    local local_port=4443
+
+    bastion_setup "regional"
+
+    local runtime_id
+    runtime_id=$(aws ecs describe-tasks \
+        --cluster "$ecs_cluster" \
+        --tasks "$task_id" \
+        --query 'tasks[0].containers[?name==`bastion`].runtimeId | [0]' \
+        --output text)
+    [[ -n "$runtime_id" && "$runtime_id" != "None" ]] \
+        || die "runtime_id not found for task '$task_id' in cluster '$ecs_cluster'"
+
+    local target="ecs:${ecs_cluster}_${task_id}_${runtime_id}"
+
+    # Retrieve ALB DNS and SRE domain from the in-cluster secret via bastion
+    echo "==> Fetching SRE gateway info from cluster..."
+    local raw
+    raw=$(aws ecs execute-command \
+        --cluster "$ecs_cluster" \
+        --task "$task_id" \
+        --container bastion \
+        --interactive \
+        --command "sh -c \"echo SRE_ALB=\$(kubectl get secret local-cluster-identity -n argocd -o jsonpath='{.metadata.annotations.sre_alb_dns_name}'); echo SRE_DOMAIN=\$(kubectl get secret local-cluster-identity -n argocd -o jsonpath='{.metadata.annotations.sre_domain}')\"" 2>/dev/null || true)
+
+    local alb_dns sre_domain
+    alb_dns=$(echo "$raw" | grep -o 'SRE_ALB=.*' | cut -d= -f2 | tr -d '[:space:]')
+    sre_domain=$(echo "$raw" | grep -o 'SRE_DOMAIN=.*' | cut -d= -f2 | tr -d '[:space:]')
+
+    [[ -n "$alb_dns" ]] || die "Could not retrieve SRE ALB DNS. Is the SRE gateway deployed?"
+    [[ -n "$sre_domain" ]] || die "Could not retrieve SRE domain."
+
+    cleanup() {
+        echo ""; echo "Closing SRE UI tunnel..."
+        kill "$ssm_pid" 2>/dev/null || true
+    }
+    chain_exit_trap cleanup
+
+    echo "==> [local] SSM tunnel localhost:${local_port} -> ${alb_dns}:443"
+    aws ssm start-session \
+        --target "$target" \
+        --document-name AWS-StartPortForwardingSessionToRemoteHost \
+        --parameters "{\"host\":[\"${alb_dns}\"],\"portNumber\":[\"443\"],\"localPortNumber\":[\"${local_port}\"]}" &
+    ssm_pid=$!
+    sleep 3
+
+    echo ""
+    echo "==> SRE UI tunnel active"
+    echo ""
+    echo "Add these lines to /etc/hosts (requires sudo):"
+    for tool in grafana argocd prometheus thanos loki; do
+        printf "    127.0.0.1  %s.%s\n" "$tool" "$sre_domain"
+    done
+    echo ""
+    echo "Then open (note: port ${local_port}, not 443):"
+    for tool in grafana argocd prometheus thanos loki; do
+        printf "    https://%s.%s:%s\n" "$tool" "$sre_domain" "$local_port"
+    done
+    echo ""
+    echo "Press Ctrl+C to close the tunnel."
+    wait "$ssm_pid"
+}
+
 case "${1:-help}" in
-    bastion|collect-logs)
+    bastion|dump-env|sre-ui)
         for tool in jq uv aws; do
             command -v "$tool" >/dev/null 2>&1 || die "Missing required tool: $tool"
         done
@@ -1096,12 +1467,12 @@ case "${1:-help}" in
             command -v "$tool" >/dev/null 2>&1 || die "Missing required tool: $tool"
         done
         ;;
-    shell|e2e)
+    shell|e2e|zoa-e2e|post-account|delete-account)
         preflight
         ensure_image
         ;;
     *)
-        # provision, teardown, resync
+        # provision, provision-resume, teardown, resync
         preflight
         ensure_image
         ;;
@@ -1109,14 +1480,19 @@ esac
 
 case "${1:-help}" in
     provision)      cmd_provision ;;
+    provision-resume) cmd_provision_resume ;;
     teardown)       cmd_teardown ;;
     resync)         cmd_resync ;;
     swap-branch)    cmd_swap_branch ;;
     shell)          cmd_shell ;;
+    post-account)   cmd_account_allowlist POST ;;
+    delete-account) cmd_account_allowlist DELETE ;;
     bastion)        shift; cmd_bastion_interactive "$@" ;;
     port-forward)   shift; cmd_bastion_port_forward "$@" ;;
+    sre-ui)         cmd_sre_tunnel ;;
     e2e)            cmd_e2e ;;
-    collect-logs)   shift; cmd_collect_logs "$@" ;;
+    zoa-e2e)        cmd_zoa_e2e ;;
+    dump-env)       shift; cmd_dump_env "$@" ;;
     help|*)
         usage
         ;;

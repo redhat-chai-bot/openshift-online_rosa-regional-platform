@@ -4,13 +4,13 @@ description: Loki log aggregation deployed via upstream grafana/loki Helm chart 
 type: application
 version: 0.2.0
 appVersion: "3.6.7"
-home: https://github.com/openshift-online/rosa-regional-platform
+home: https://github.com/openshift-online/rosa-seaplane
 sources:
-  - https://github.com/openshift-online/rosa-regional-platform
+  - https://github.com/openshift-online/rosa-seaplane
   - https://github.com/grafana/loki
   - https://grafana.github.io/helm-charts
 maintainers:
-  - name: ROSA Regional Platform Team
+  - name: ROSA Seaplane Team
 keywords:
   - loki
   - logs

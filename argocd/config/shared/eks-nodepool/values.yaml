@@ -1,0 +1,22 @@
+eksNodePool:
+  instanceFamilies:
+    - m8i
+    - m7i
+  capacityType: on-demand
+  arch: amd64
+  limits:
+    cpu: "64"
+    memory: 256Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 60s
+  # Pin a specific AMI. When null (default), the bottlerocket FIPS name
+  # selector is used and amiFamily defaults to Bottlerocket.
+  # Example: ami: {family: Bottlerocket, id: ami-0abc123}
+  ami: null
+  # Root volume size, applied to the EC2NodeClass when `ami` is set. The default
+  # Bottlerocket path uses Karpenter's own device defaults.
+  rootVolumeSize: 50Gi
+
+global:
+  cluster_name: ""

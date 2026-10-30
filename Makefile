@@ -1,4 +1,4 @@
-.PHONY: help terraform-fmt terraform-init terraform-validate terraform-upgrade terraform-output-management terraform-output-regional helm-lint check-rendered-files promtool-test ephemeral-provision ephemeral-teardown ephemeral-resync ephemeral-list ephemeral-shell ephemeral-bastion-rc ephemeral-bastion-mc ephemeral-port-forward-rc ephemeral-port-forward-mc ephemeral-port-forward-rc-all ephemeral-port-forward-mc-all ephemeral-e2e ephemeral-collect-logs int-shell int-bastion-rc int-bastion-mc int-port-forward-rc int-port-forward-mc int-port-forward-rc-all int-port-forward-mc-all int-e2e int-collect-logs check-docs check-default-tags pre-push render
+.PHONY: help terraform-fmt terraform-init terraform-validate terraform-upgrade terraform-output-management terraform-output-regional helm-lint check-rendered-files promtool-test check-session-manager-plugin ephemeral-provision ephemeral-provision-resume ephemeral-teardown ephemeral-resync ephemeral-list ephemeral-shell ephemeral-post-account-shell ephemeral-delete-account-shell ephemeral-bastion-rc ephemeral-bastion-mc ephemeral-port-forward-rc ephemeral-port-forward-mc ephemeral-port-forward-rc-all ephemeral-port-forward-mc-all ephemeral-sre-ui ephemeral-e2e ephemeral-dump-env int-shell int-bastion-rc int-bastion-mc int-port-forward-rc int-port-forward-mc int-port-forward-rc-all int-port-forward-mc-all int-e2e int-dump-env stage-shell stage-bastion-rc stage-bastion-mc stage-port-forward-rc stage-port-forward-mc stage-port-forward-rc-all stage-port-forward-mc-all stage-e2e stage-dump-env check-docs check-default-tags pre-push render
 
 # =============================================================================
 # Local tool management
@@ -31,6 +31,14 @@ $(LOCALBIN)/yq: | $(LOCALBIN)
 	@curl -fsSL "https://github.com/mikefarah/yq/releases/download/$(YQ_VERSION)/yq_$(UNAME_S)_$(ARCH)" -o $(LOCALBIN)/yq
 	@chmod +x $(LOCALBIN)/yq
 	@echo "   ✅ yq $(YQ_VERSION) installed to $(LOCALBIN)/yq"
+
+check-session-manager-plugin: ## Verify AWS session-manager-plugin is installed (SSM port-forward)
+	@PATH="/usr/local/sessionmanagerplugin/bin:$$PATH"; \
+	command -v session-manager-plugin >/dev/null 2>&1 || { \
+	  echo "❌ session-manager-plugin not found (required for bastion port-forward and silence e2e)."; \
+	  echo "   Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"; \
+	  exit 1; \
+	}
 
 # Default target — interactive fzf picker, falls back to formatted list
 help: ## Show this help message
@@ -121,7 +129,7 @@ terraform-validate: terraform-init ## Check formatting and validate all Terrafor
 
 # Global values (aws_region, environment, cluster_type) are injected by the
 # ApplicationSet at deploy time, so we supply stubs here for linting.
-HELM_LINT_SET := --set global.aws_region=us-east-1 --set global.environment=lint --set global.cluster_type=lint
+HELM_LINT_SET := --set global.aws_region=us-east-1 --set global.environment=lint --set global.cluster_type=lint --set global.cluster_name=lint
 helm-lint: ## Lint all Helm charts
 	@echo "🔍 Linting Helm charts..."
 	@failed=false; \
@@ -167,13 +175,29 @@ check-docs: ## Check documentation formatting
 	@npx --no-install prettier --check '**/*.md'
 	@echo "✅ Documentation formatting check complete"
 
+# central-account-bootstrap (shared connection/state) is excluded from tag
+# enforcement; the CodePipeline modules are tagged and linted normally.
+TFLINT_EXCLUDE_DIRS := \
+	./terraform/config/central-account-bootstrap
+
+TFLINT_DIRS := $(filter-out $(TFLINT_EXCLUDE_DIRS),$(TERRAFORM_DIRS))
+
+check-default-tags: ## Check all AWS resources have required tags (function, module)
+	@echo "🔍 Checking AWS resource tag coverage..."
+	@tflint --init --config .tflint.hcl
+	@echo "$(TFLINT_DIRS)" | tr ' ' '\n' | xargs -P 4 -I{} sh -c ' \
+		echo "   Checking $$1"; \
+		tflint --config "$(CURDIR)/.tflint.hcl" --chdir "$$1" \
+	' _ {} || { echo "❌ Tag coverage check failed — add missing tags or update .tflint.hcl"; exit 1; }
+	@echo "✅ Tag coverage check complete"
+
 pre-push: ## Run all CI validation checks (parallel)
 	@echo "🚀 Running all CI validation checks..."
 	@echo ""
 	@echo "Formatting Terraform files..."
 	@$(MAKE) terraform-fmt
 	@echo ""
-	@$(MAKE) -j4 check-docs check-rendered-files helm-lint terraform-validate promtool-test
+	@$(MAKE) -j4 check-docs check-rendered-files helm-lint terraform-validate promtool-test check-default-tags
 	@echo ""
 	@echo "✅ All pre-push checks passed!"
 
@@ -183,15 +207,19 @@ pre-push: ## Run all CI validation checks (parallel)
 # Thin wrappers around scripts/dev/ephemeral-env.sh.
 # See docs/development-environment.md for full usage guide.
 
-REPO   ?= openshift-online/rosa-regional-platform
+REPO   ?= openshift-online/rosa-seaplane
 BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD)
 
 ephemeral-provision: ## Provision an ephemeral environment
 	@ID="$(ID)" REPO="$(REPO)" BRANCH="$(if $(filter command line,$(origin BRANCH)),$(BRANCH),)" \
 		./scripts/dev/ephemeral-env.sh provision
 
-ephemeral-teardown: ## Tear down an ephemeral environment
-	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh teardown
+ephemeral-provision-resume: ## Resync and resume a failed ephemeral provisioning run (RESYNC=false to skip resync)
+	@ID="$(ID)" RESYNC="$(if $(RESYNC),$(RESYNC),true)" \
+		./scripts/dev/ephemeral-env.sh provision-resume
+
+ephemeral-teardown: ## Tear down (RESYNC=1: update CI branch from your feature branch, then destroy — use after a failed teardown)
+	@ID="$(ID)" RESYNC="$(RESYNC)" ./scripts/dev/ephemeral-env.sh teardown
 
 ephemeral-resync: ## Resync an ephemeral environment to your branch
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh resync
@@ -206,35 +234,50 @@ ephemeral-list: ## List ephemeral environments
 ephemeral-shell: ## Interactive shell for Platform API access (ephemeral)
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh shell
 
+ephemeral-post-account-shell: ## Allowlist a customer AWS account with the platform API (ACCOUNT_ID=<12-digit-id> required)
+	@ID="$(ID)" ACCOUNT_ID="$(ACCOUNT_ID)" ./scripts/dev/ephemeral-env.sh post-account
+
+ephemeral-delete-account-shell: ## Revoke an allowlisted customer AWS account (ACCOUNT_ID=<12-digit-id> required)
+	@ID="$(ID)" ACCOUNT_ID="$(ACCOUNT_ID)" ./scripts/dev/ephemeral-env.sh delete-account
+
 ephemeral-bastion-rc: ## Connect to RC bastion in an ephemeral env
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh bastion --cluster-type regional
 
 ephemeral-bastion-mc: ## Connect to MC bastion in an ephemeral env
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh bastion --cluster-type management
 
-ephemeral-port-forward-rc: ## Port-forward to RC service in an ephemeral env
+ephemeral-port-forward-rc: check-session-manager-plugin ## Port-forward to RC service in an ephemeral env
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh port-forward --cluster-type regional
 
-ephemeral-port-forward-mc: ## Port-forward to MC service in an ephemeral env
+ephemeral-port-forward-mc: check-session-manager-plugin ## Port-forward to MC service in an ephemeral env
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh port-forward --cluster-type management
 
-ephemeral-port-forward-rc-all: ## Port-forward all RC services in an ephemeral env
+ephemeral-port-forward-rc-all: check-session-manager-plugin ## Port-forward all RC services in an ephemeral env
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh port-forward --cluster-type regional --all
 
-ephemeral-port-forward-mc-all: ## Port-forward all MC services in an ephemeral env
+ephemeral-port-forward-mc-all: check-session-manager-plugin ## Port-forward all MC services in an ephemeral env
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh port-forward --cluster-type management --all
 
-ephemeral-e2e: ## Run e2e tests against an ephemeral env
+ephemeral-sre-ui: check-session-manager-plugin ## Tunnel SRE UI tools (Grafana, ArgoCD, Prometheus, Thanos, Loki) through the internal ALB via bastion
+	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh sre-ui
+
+ephemeral-e2e: check-session-manager-plugin ## Run e2e tests against an ephemeral env
 	@ID="$(ID)" E2E_REF="$(or $(E2E_REF),main)" E2E_REPO="$(E2E_REPO)" ./scripts/dev/ephemeral-env.sh e2e
 
-ephemeral-collect-logs: ## Collect logs from an ephemeral env (CLUSTER=rc|mc)
-	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh collect-logs $(CLUSTER)
+ephemeral-zoa-e2e: ## Run zoa's deep e2e suite against an ephemeral env (ZOA_REF/ZOA_REPO to target a branch/fork)
+	@ID="$(ID)" ZOA_REF="$(or $(ZOA_REF),main)" ZOA_REPO="$(ZOA_REPO)" GINKGO_FLAGS="$(GINKGO_FLAGS)" ZOA_MAKE_TARGET=test-e2e ./scripts/dev/ephemeral-env.sh zoa-e2e
+
+ephemeral-zoa-e2e-smoke: ## Run zoa's smoke e2e suite (fast ~2min) against an ephemeral env
+	@ID="$(ID)" ZOA_REF="$(or $(ZOA_REF),main)" ZOA_REPO="$(ZOA_REPO)" GINKGO_FLAGS="$(GINKGO_FLAGS)" ZOA_MAKE_TARGET=test-e2e-smoke ./scripts/dev/ephemeral-env.sh zoa-e2e
+
+ephemeral-dump-env: ## Dump EKS must-gather and DB state from an ephemeral env (CLUSTER=rc|mc)
+	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh dump-env $(CLUSTER)
 
 # =============================================================================
 # Integration Environment
 # =============================================================================
 # Thin wrappers around scripts/dev/int-env.sh.
-# Uses AWS profiles with SAML auth (account IDs from rosa-regional-platform-internal or RRP_ACCOUNTS_INT).
+# Uses AWS profiles with SAML auth (account IDs from rosa-seaplane-internal or RRP_ACCOUNTS_INT).
 
 int-shell: ## Interactive shell for Platform API access (int)
 	@./scripts/dev/int-env.sh shell
@@ -245,23 +288,56 @@ int-bastion-rc: ## Connect to RC bastion in int env
 int-bastion-mc: ## Connect to MC bastion in int env
 	@./scripts/dev/int-env.sh bastion --cluster-type management
 
-int-port-forward-rc: ## Port-forward to RC service in int env
+int-port-forward-rc: check-session-manager-plugin ## Port-forward to RC service in int env
 	@./scripts/dev/int-env.sh port-forward --cluster-type regional
 
-int-port-forward-mc: ## Port-forward to MC service in int env
+int-port-forward-mc: check-session-manager-plugin ## Port-forward to MC service in int env
 	@./scripts/dev/int-env.sh port-forward --cluster-type management
 
-int-port-forward-rc-all: ## Port-forward all RC services in int env
+int-port-forward-rc-all: check-session-manager-plugin ## Port-forward all RC services in int env
 	@./scripts/dev/int-env.sh port-forward --cluster-type regional --all
 
-int-port-forward-mc-all: ## Port-forward all MC services in int env
+int-port-forward-mc-all: check-session-manager-plugin ## Port-forward all MC services in int env
 	@./scripts/dev/int-env.sh port-forward --cluster-type management --all
 
-int-e2e: ## Run e2e tests against int env
+int-e2e: check-session-manager-plugin ## Run e2e tests against int env
 	@E2E_REF="$(or $(E2E_REF),main)" E2E_REPO="$(E2E_REPO)" ./scripts/dev/int-env.sh e2e
 
-int-collect-logs: ## Collect logs from int env (CLUSTER=rc|mc)
-	@./scripts/dev/int-env.sh collect-logs $(CLUSTER)
+int-dump-env: ## Dump EKS must-gather and DB state from int env (CLUSTER=rc|mc)
+	@./scripts/dev/int-env.sh dump-env $(CLUSTER)
+
+# =============================================================================
+# Stage Environment
+# =============================================================================
+# Thin wrappers around scripts/dev/stage-env.sh.
+# Uses AWS profiles with SAML auth (account IDs from rosa-seaplane-internal or RRP_ACCOUNTS_STAGE).
+
+stage-shell: ## Interactive shell for Platform API access (stage)
+	@./scripts/dev/stage-env.sh shell
+
+stage-bastion-rc: ## Connect to RC bastion in stage env
+	@./scripts/dev/stage-env.sh bastion --cluster-type regional
+
+stage-bastion-mc: ## Connect to MC bastion in stage env
+	@./scripts/dev/stage-env.sh bastion --cluster-type management
+
+stage-port-forward-rc: check-session-manager-plugin ## Port-forward to RC service in stage env
+	@./scripts/dev/stage-env.sh port-forward --cluster-type regional
+
+stage-port-forward-mc: check-session-manager-plugin ## Port-forward to MC service in stage env
+	@./scripts/dev/stage-env.sh port-forward --cluster-type management
+
+stage-port-forward-rc-all: check-session-manager-plugin ## Port-forward all RC services in stage env
+	@./scripts/dev/stage-env.sh port-forward --cluster-type regional --all
+
+stage-port-forward-mc-all: check-session-manager-plugin ## Port-forward all MC services in stage env
+	@./scripts/dev/stage-env.sh port-forward --cluster-type management --all
+
+stage-e2e: check-session-manager-plugin ## Run e2e tests against stage env
+	@E2E_REF="$(or $(E2E_REF),main)" E2E_REPO="$(E2E_REPO)" ./scripts/dev/stage-env.sh e2e
+
+stage-dump-env: ## Dump EKS must-gather and DB state from stage env (CLUSTER=rc|mc)
+	@./scripts/dev/stage-env.sh dump-env $(CLUSTER)
 
 render: ## Render config templates
 	@uv run scripts/render.py

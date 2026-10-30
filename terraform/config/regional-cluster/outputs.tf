@@ -35,9 +35,19 @@ output "private_subnets" {
   value       = module.vpc.private_subnet_ids
 }
 
+output "vpc_cidr" {
+  description = "VPC CIDR block"
+  value       = module.vpc.vpc_cidr
+}
+
 output "cluster_security_group_id" {
   description = "EKS cluster security group ID"
   value       = module.vpc.cluster_security_group_id
+}
+
+output "seaplane_db_security_group_id" {
+  description = "Seaplane DB RDS security group ID"
+  value       = module.seaplane_db.security_group_id
 }
 
 output "node_security_group_id" {
@@ -156,11 +166,6 @@ output "rhobs_api_url" {
   value       = module.rhobs_api_gateway.invoke_url
 }
 
-output "api_allowed_accounts" {
-  description = "Platform API allowed accounts (comma-separated account IDs, including current account)"
-  value       = join(",", local.api_allowed_accounts)
-}
-
 output "api_alb_dns_name" {
   description = "Internal ALB DNS name"
   value       = module.api_gateway.alb_dns_name
@@ -206,176 +211,39 @@ output "api_domain_regional_domain_name" {
   value       = module.api_gateway.api_domain_regional_domain_name
 }
 
-# Maestro Infrastructure Outputs
+# =============================================================================
+# Seaplane Operator Outputs
 # =============================================================================
 
-# AWS IoT Core
-output "maestro_iot_mqtt_endpoint" {
-  description = "AWS IoT Core MQTT endpoint for Maestro broker connection"
-  value       = module.maestro_infrastructure.iot_mqtt_endpoint
+output "seaplane_operator_role_arn" {
+  description = "IAM role ARN for seaplane-operator (Pod Identity)"
+  value       = aws_iam_role.seaplane_operator.arn
 }
 
-# RDS Database
-output "maestro_rds_endpoint" {
-  description = "Maestro RDS PostgreSQL endpoint (hostname:port)"
-  value       = module.maestro_infrastructure.rds_endpoint
+output "seaplane_db_endpoint" {
+  description = "Seaplane DB RDS endpoint (host:port)"
+  value       = module.seaplane_db.endpoint
 }
 
-output "maestro_rds_address" {
-  description = "Maestro RDS PostgreSQL hostname"
-  value       = module.maestro_infrastructure.rds_address
+output "seaplane_db_dsn_secret_arn" {
+  description = "ARN of the Secrets Manager secret containing the PostgreSQL DSN"
+  value       = module.seaplane_db.dsn_secret_arn
 }
 
-output "maestro_rds_port" {
-  description = "Maestro RDS PostgreSQL port"
-  value       = module.maestro_infrastructure.rds_port
+output "seaplane_db_dsn_secret_name" {
+  description = "Name of the Secrets Manager secret containing the PostgreSQL DSN"
+  value       = module.seaplane_db.dsn_secret_name
 }
 
-# Secrets Manager
-output "maestro_server_cert_secret_name" {
-  description = "Secrets Manager secret name for Maestro Server certificate material"
-  value       = module.maestro_infrastructure.maestro_server_cert_secret_name
+# ElastiCache Valkey
+output "seaplane_redis_endpoint" {
+  description = "ElastiCache Valkey endpoint for rate limiting (null if disabled)"
+  value       = var.enable_rate_limit_redis ? module.elasticache_valkey[0].endpoint : null
 }
 
-output "maestro_server_config_secret_name" {
-  description = "Secrets Manager secret name for Maestro Server MQTT configuration"
-  value       = module.maestro_infrastructure.maestro_server_config_secret_name
-}
-
-output "maestro_db_credentials_secret_name" {
-  description = "Secrets Manager secret name for Maestro database credentials"
-  value       = module.maestro_infrastructure.maestro_db_credentials_secret_name
-}
-
-# IAM Roles
-output "maestro_server_role_arn" {
-  description = "IAM role ARN for Maestro Server (Pod Identity)"
-  value       = module.maestro_infrastructure.maestro_server_role_arn
-}
-
-# Configuration Summary
-output "maestro_configuration_summary" {
-  description = "Complete Maestro configuration for use in Helm values"
-  value       = module.maestro_infrastructure.maestro_configuration_summary
-  sensitive   = false
-}
-
-# =============================================================================
-# Authorization Outputs
-# =============================================================================
-
-# DynamoDB Tables
-output "authz_accounts_table_name" {
-  description = "Authz accounts DynamoDB table name"
-  value       = module.authz.accounts_table_name
-}
-
-output "authz_admins_table_name" {
-  description = "Authz admins DynamoDB table name"
-  value       = module.authz.admins_table_name
-}
-
-output "authz_groups_table_name" {
-  description = "Authz groups DynamoDB table name"
-  value       = module.authz.groups_table_name
-}
-
-output "authz_members_table_name" {
-  description = "Authz group members DynamoDB table name"
-  value       = module.authz.members_table_name
-}
-
-output "authz_policies_table_name" {
-  description = "Authz policies DynamoDB table name"
-  value       = module.authz.policies_table_name
-}
-
-output "authz_attachments_table_name" {
-  description = "Authz attachments DynamoDB table name"
-  value       = module.authz.attachments_table_name
-}
-
-# IAM Role
-output "authz_frontend_api_role_arn" {
-  description = "IAM role ARN for Frontend API with authz permissions (Pod Identity)"
-  value       = module.authz.frontend_api_role_arn
-}
-
-# Configuration Summary
-output "authz_configuration_summary" {
-  description = "Complete authz configuration for use in Helm values"
-  value       = module.authz.authz_configuration_summary
-  sensitive   = false
-}
-
-# =============================================================================
-# HyperFleet Infrastructure Outputs
-# =============================================================================
-
-# RDS Database
-output "hyperfleet_rds_endpoint" {
-  description = "HyperFleet RDS PostgreSQL endpoint (hostname:port)"
-  value       = module.hyperfleet_infrastructure.rds_endpoint
-}
-
-output "hyperfleet_rds_address" {
-  description = "HyperFleet RDS PostgreSQL hostname"
-  value       = module.hyperfleet_infrastructure.rds_address
-}
-
-output "hyperfleet_rds_port" {
-  description = "HyperFleet RDS PostgreSQL port"
-  value       = module.hyperfleet_infrastructure.rds_port
-}
-
-output "hyperfleet_rds_database_name" {
-  description = "HyperFleet PostgreSQL database name"
-  value       = module.hyperfleet_infrastructure.rds_database_name
-}
-
-# Amazon MQ
-output "hyperfleet_mq_amqp_endpoint" {
-  description = "HyperFleet Amazon MQ AMQPS endpoint"
-  value       = module.hyperfleet_infrastructure.mq_amqp_endpoint
-}
-
-output "hyperfleet_mq_console_url" {
-  description = "HyperFleet RabbitMQ management console URL"
-  value       = module.hyperfleet_infrastructure.mq_console_url
-}
-
-# Secrets Manager
-output "hyperfleet_db_secret_name" {
-  description = "Secrets Manager secret name for HyperFleet database credentials"
-  value       = module.hyperfleet_infrastructure.db_secret_name
-}
-
-output "hyperfleet_mq_secret_name" {
-  description = "Secrets Manager secret name for HyperFleet MQ credentials"
-  value       = module.hyperfleet_infrastructure.mq_secret_name
-}
-
-# IAM Roles
-output "hyperfleet_api_role_arn" {
-  description = "IAM role ARN for HyperFleet API (Pod Identity)"
-  value       = module.hyperfleet_infrastructure.api_role_arn
-}
-
-output "hyperfleet_sentinel_role_arn" {
-  description = "IAM role ARN for HyperFleet Sentinel (Pod Identity)"
-  value       = module.hyperfleet_infrastructure.sentinel_role_arn
-}
-
-output "hyperfleet_adapter_role_arn" {
-  description = "IAM role ARN for HyperFleet Adapter (Pod Identity)"
-  value       = module.hyperfleet_infrastructure.adapter_role_arn
-}
-
-# Configuration Summary
-output "hyperfleet_configuration_summary" {
-  description = "Complete HyperFleet infrastructure configuration for use in Helm values"
-  value       = module.hyperfleet_infrastructure.configuration_summary
-  sensitive   = true
+output "seaplane_redis_port" {
+  description = "ElastiCache Valkey port (null if disabled)"
+  value       = var.enable_rate_limit_redis ? module.elasticache_valkey[0].port : null
 }
 
 # =============================================================================
@@ -441,4 +309,102 @@ output "loki_distributor_target_group_arn" {
 output "loki_query_frontend_target_group_arn" {
   description = "Target group ARN for Loki Query Frontend TargetGroupBinding (dedicated RHOBS ALB)"
   value       = module.rhobs_api_gateway.loki_query_frontend_target_group_arn
+}
+
+# =============================================================================
+# ZOA Outputs
+# =============================================================================
+
+# =============================================================================
+# SRE UI ALB Outputs
+# =============================================================================
+
+output "sre_grafana_target_group_arn" {
+  description = "ARN of the Grafana SRE ALB target group"
+  value       = try(module.sre_ui_alb[0].grafana_target_group_arn, "")
+}
+
+output "sre_argocd_target_group_arn" {
+  description = "ARN of the ArgoCD SRE ALB target group"
+  value       = try(module.sre_ui_alb[0].argocd_target_group_arn, "")
+}
+
+output "sre_prometheus_target_group_arn" {
+  description = "ARN of the Prometheus SRE ALB target group"
+  value       = try(module.sre_ui_alb[0].prometheus_target_group_arn, "")
+}
+
+output "sre_thanos_target_group_arn" {
+  description = "ARN of the Thanos Query Frontend SRE ALB target group"
+  value       = try(module.sre_ui_alb[0].thanos_target_group_arn, "")
+}
+
+output "sre_alb_dns_name" {
+  description = "DNS name of the SRE UI ALB"
+  value       = try(module.sre_ui_alb[0].alb_dns_name, "")
+}
+
+output "sre_domain" {
+  description = "SRE base domain (e.g. sre.us-east-1.int0.rosa.devshift.net)"
+  value       = try(module.sre_ui_alb[0].sre_domain, "")
+}
+
+output "zoa_table_name" {
+  description = "DynamoDB table name for ZOA executions"
+  value       = module.zoa.table_name
+}
+
+output "zoa_audit_table_name" {
+  description = "DynamoDB table name for ZOA audit log"
+  value       = module.zoa.audit_table_name
+}
+
+output "zoa_sessions_table_name" {
+  description = "DynamoDB table name for ZOA boundary sessions (single table in RC, all clusters)"
+  value       = module.zoa.sessions_table_name
+}
+
+output "zoa_bucket_name" {
+  description = "S3 bucket name for ZOA outputs"
+  value       = module.zoa.bucket_name
+}
+
+output "zoa_bucket_arn" {
+  description = "S3 bucket ARN for ZOA outputs (used by MC Pod Identity)"
+  value       = module.zoa.bucket_arn
+}
+
+output "zoa_kms_key_arn" {
+  description = "KMS key ARN for ZOA encryption (used by MC Pod Identity for S3 SSE-KMS)"
+  value       = module.zoa.kms_key_arn
+}
+
+output "zoa_uploader_role_arn" {
+  description = "ARN of the ZOA uploader role (MC Lambdas assume this for scoped S3 creds)"
+  value       = module.zoa.uploader_role_arn
+}
+
+output "zoa_data_access_role_arn" {
+  description = "ARN of the ZOA data-access role (MC Lambdas assume this for cross-account DynamoDB+S3)"
+  value       = module.zoa.data_access_role_arn
+}
+
+output "zoa_lambda_ecr_url" {
+  description = "ECR repository URL for ZOA Lambda (MC appends tag for cross-account pull)"
+  value       = module.zoa.lambda_ecr_url
+}
+
+output "zoa_access_lambda_role_arn" {
+  description = "ARN of the ZOA Access Lambda execution role (MC boundary IAM trusts this for cross-account ECS)"
+  value       = module.zoa_lambda.access_lambda_role_arn
+}
+
+output "zoa_api_function_url" {
+  description = "Function URL for the ZOA API Lambda (used by ZOA boundary tasks and CLI)"
+  value       = module.zoa_lambda.api_function_url
+}
+
+output "deployment_name" {
+  description = "Logical deployment name (ZOA Access/SSM discovery, DNS). Same value passed to module.zoa_access."
+  value       = var.deployment_name
 }

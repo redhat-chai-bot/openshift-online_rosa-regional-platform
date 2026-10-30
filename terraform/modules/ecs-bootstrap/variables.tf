@@ -38,7 +38,7 @@ variable "container_image" {
 variable "repository_url" {
   description = "Git repository URL for cluster configuration"
   type        = string
-  default     = "https://github.com/openshift-online/rosa-regional-platform"
+  default     = "https://github.com/openshift-online/rosa-seaplane"
 }
 
 variable "repository_branch" {
@@ -65,3 +65,57 @@ variable "management_clusters" {
   default     = ""
 }
 
+variable "rc_aws_account_id" {
+  description = "AWS account ID of the regional cluster where DynamoDB tables reside. Injected into the ArgoCD cluster secret so charts can build cross-account resource ARNs."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.rc_aws_account_id == "" || can(regex("^[0-9]{12}$", var.rc_aws_account_id))
+    error_message = "rc_aws_account_id must be empty or a 12-digit AWS account ID."
+  }
+}
+
+variable "redis_endpoint" {
+  description = "ElastiCache Valkey endpoint for Platform API rate limiting"
+  type        = string
+  default     = ""
+}
+
+# -----------------------------------------------------------------------------
+# Seaplane DB — ZOA read-only IAM role provisioning (RC only)
+#
+# When set, the bootstrap task provisions a dedicated Postgres role granted
+# rds_iam so the ZOA Lambda can connect via RDS IAM auth. Left empty for MCs
+# (which have no seaplane-db), skipping the step.
+# -----------------------------------------------------------------------------
+
+variable "enable_zoa_db_bootstrap" {
+  description = "Whether the bootstrap task provisions the ZOA read-only IAM DB role. Enabled on the RC (which has seaplane-db), disabled on MCs. Must be known at plan time because it drives resource count."
+  type        = bool
+  default     = false
+}
+
+variable "seaplane_db_dsn_secret_arn" {
+  description = "Secrets Manager ARN of the seaplane-db master DSN. Used to grant the bootstrap task access and injected as a bootstrap env var when enable_zoa_db_bootstrap is true."
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_kms_key_arn" {
+  description = "KMS key ARN encrypting the seaplane-db DSN secret (needed to decrypt it)."
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_name" {
+  description = "Seaplane database name (used in GRANT CONNECT)."
+  type        = string
+  default     = ""
+}
+
+variable "seaplane_db_reader_username" {
+  description = "Postgres role name for ZOA read-only IAM auth."
+  type        = string
+  default     = "zoa_ro"
+}

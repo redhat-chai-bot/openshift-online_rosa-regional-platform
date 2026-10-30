@@ -2,6 +2,8 @@
 
 Tear down and re-provision the integration environment when it is unrecoverable through normal pipeline runs.
 
+This procedure assumes the environment already uses the [current per-cluster CodePipeline architecture](../design/codepipeline-cluster-lifecycle.md). For legacy Terraform-managed pipelines, complete the documented migration planning first.
+
 ## Prerequisites
 
 1. AWS Console access to the **central account** (hosts CodePipeline)
@@ -15,8 +17,8 @@ The rebuild follows a teardown-then-provision cycle. MC must be torn down before
 sequenceDiagram
     participant Operator
     participant Console as AWS Console<br/>(Central Account)
-    participant MC as MC Pipeline<br/>(mc01-pipe)
-    participant RC as RC Pipeline<br/>(regional-pipe)
+    participant MC as MC Pipeline<br/>(mc01-pipeline)
+    participant RC as RC Pipeline<br/>(regional-pipeline)
     Operator->>Console: Start MC pipeline (IS_DESTROY=true)
     Console->>MC: Trigger teardown
     MC-->>Console: Complete (may partially fail)
@@ -25,11 +27,14 @@ sequenceDiagram
     RC-->>Console: Complete (may partially fail)
     Operator->>Console: Manually delete leftover resources
     Note over Operator,Console: Check RC and MC accounts for<br/>orphaned resources
-    Operator->>Console: Re-run provisioner pipeline
+    Operator->>Operator: Bootstrap cluster definitions with RC/MC push triggers disabled
+    Operator->>Console: Start RC pipeline (IS_DESTROY=false)
     Console->>RC: Provision RC
     RC-->>Console: Complete
+    Operator->>Console: Start MC pipeline (IS_DESTROY=false)
     Console->>MC: Provision MC
     MC-->>Console: Complete
+    Operator->>Operator: Re-enable push triggers after RC and MC succeed
     Operator->>Operator: Trigger nightly-integration to verify
 ```
 
@@ -37,7 +42,7 @@ sequenceDiagram
 
 1. Open the [AWS CodePipeline console](https://console.aws.amazon.com/codesuite/codepipeline/pipelines) in the **central account**.
 
-2. Find the MC pipeline: `mc01-pipe`.
+2. Find the MC pipeline: `mc01-pipeline`. Suspend source-triggered executions during the rebuild so a push cannot race with teardown.
 
 3. Click **Release change** (or **Start execution** in the pipeline detail view). When prompted for pipeline variables, set:
 
@@ -49,7 +54,7 @@ sequenceDiagram
 
 ### Step 2: Tear down the Regional Cluster
 
-1. In the same CodePipeline console, find the RC pipeline: `regional-pipe`.
+1. In the same CodePipeline console, find the RC pipeline: `regional-pipeline`. Suspend its source-triggered executions during the rebuild as well.
 
 2. Start execution with:
 
@@ -61,10 +66,10 @@ sequenceDiagram
 
 ### Step 3: Clean up leftover resources
 
-After both teardowns complete, three Secrets Manager secrets in the MC account will remain scheduled for deletion with a 30-day recovery window. These block re-provision because Terraform cannot create a secret while another with the same name is pending deletion. Force-delete them:
+After both teardowns complete, the HyperShift config secret in the MC account will remain scheduled for deletion with a 30-day recovery window. This blocks re-provision because Terraform cannot create a secret while another with the same name is pending deletion. Force-delete it:
 
 ```bash
-for secret in mc01-maestro-agent-cert mc01-maestro-agent-config hypershift/mc01-config; do
+for secret in hypershift/mc01-config; do
   aws secretsmanager delete-secret --secret-id "$secret" --force-delete-without-recovery --region us-east-1
 done
 ```
@@ -75,20 +80,37 @@ If the teardown failed more broadly, also check for other leaked resources (ENIs
 
 ### Step 4: Re-provision
 
-Trigger the parent provisioner pipeline to re-create the RC and MC pipelines and start a fresh provision:
+Reconcile the current cluster definitions and provision RC and MC while their
+source push triggers remain disabled. Keep the integration repository, branch,
+environment, and rendered resource-prefix configuration unchanged. Add only
+`ENABLE_CODEPIPELINE_PUSH_TRIGGERS=false` to the existing central-bootstrap
+command:
 
-1. In the CodePipeline console (central account), find the provisioner pipeline: `pipeline-provisioner`.
+```bash
+ENABLE_CODEPIPELINE_PUSH_TRIGGERS=false \
+GITHUB_REPOSITORY="<existing-owner>/rosa-seaplane" \
+GITHUB_BRANCH="<existing-branch>" \
+TARGET_ENVIRONMENT=integration \
+./scripts/bootstrap-central-account.sh
+```
 
-2. Click **Release change**. Leave all variables at their defaults (do **not** set `FORCE_DELETE_ALL_PIPELINES`).
+Replace the repository and branch placeholders with the values used by the
+existing integration pipelines. Do not change the source config or rendered
+cluster descriptors that contain the resource prefixes. The bootstrap updates
+the RC and MC pipelines with push triggers disabled.
 
-3. The provisioner will:
-   - Rebuild the RC and MC child pipelines (if needed)
-   - Trigger the RC pipeline, which provisions the regional cluster infrastructure
-   - Trigger the MC pipeline, which provisions the management cluster infrastructure
+1. For existing pipelines, start `regional-pipeline` with `IS_DESTROY=false` and wait for it to succeed. A newly created pipeline starts automatically; monitor that execution instead of starting a duplicate.
 
-4. Monitor both child pipelines until they succeed. The full provision typically takes 30-45 minutes.
+2. Start `mc01-pipeline` with `IS_DESTROY=false`, or monitor its automatic creation execution. The MC build waits for regional prerequisites before completing bootstrap.
 
-   If the provision fails due to leftover resources from Step 3, delete the conflicting resources and re-trigger the failed pipeline.
+3. Monitor both pipelines until they succeed. If either fails, keep push triggers disabled while fixing or retrying it.
+
+   If provisioning fails due to leftover resources from Step 3, delete the conflicting resources and re-trigger the failed pipeline.
+
+4. After both pipelines succeed, rerun the same central-bootstrap command with
+   `ENABLE_CODEPIPELINE_PUSH_TRIGGERS=true` and the same repository, branch,
+   environment, and rendered resource-prefix configuration. This restores the
+   normal push-trigger behavior.
 
 ## Post-Rebuild
 
@@ -122,7 +144,7 @@ The RHOBS API Gateway uses a raw `execute-api` URL that changes on every rebuild
    ```bash
    make int-shell
    # In shell:
-   awscurl --service execute-api $API_URL/v0/live
+   awscurl --service execute-api $API_URL/api/v0/live
    ```
 
    Expected response: `{"status":"ok"}`
@@ -133,7 +155,7 @@ The RHOBS API Gateway uses a raw `execute-api` URL that changes on every rebuild
    curl -X POST \
        -H "Authorization: Bearer $(oc whoami -t)" \
        'https://gangway-ci.apps.ci.l2s4.p1.openshiftapps.com/v1/executions/' \
-       -d '{"job_name": "periodic-ci-openshift-online-rosa-regional-platform-main-nightly-integration", "job_execution_type": "1"}'
+       -d '{"job_name": "periodic-ci-openshift-online-rosa-seaplane-main-nightly-integration", "job_execution_type": "1"}'
    ```
 
 ## Reference
@@ -141,4 +163,4 @@ The RHOBS API Gateway uses a raw `execute-api` URL that changes on every rebuild
 - [Provision a New Environment](../environment-provisioning.md) for the full provisioning guide
 - [CI Jobs](../../ci/README.md) for CI job details and manual trigger instructions
 - Pipeline buildspec scripts: [`scripts/buildspec/provision-infra-rc.sh`](../../scripts/buildspec/provision-infra-rc.sh), [`scripts/buildspec/provision-infra-mc.sh`](../../scripts/buildspec/provision-infra-mc.sh)
-- Pipeline names are derived from `regional_id` and `management_id` in the environment config (`config/<environment>/<region>.yaml`), constructed as `<id>-pipe` in the pipeline Terraform modules
+- Pipeline names are derived from `regional_id` and `management_id` in rendered `pipeline-provisioner-inputs/` files, constructed as `<id>-pipeline` by `scripts/provision-cluster-resources.sh`
