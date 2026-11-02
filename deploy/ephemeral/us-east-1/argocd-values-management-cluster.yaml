@@ -9,6 +9,10 @@ eksNodePool:
   instanceFamilies:
   - m8i-flex
   - m7i-flex
+  ami:
+    family: AL2023
+    id: ami-056d5e72aa5cf51f1
+  rootVolumeSize: 50Gi
 hypershift:
   oidcStorageS3Bucket:
     name: hypershift-mc-us-east-1

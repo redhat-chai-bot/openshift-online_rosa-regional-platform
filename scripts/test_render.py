@@ -10,8 +10,11 @@
 # ///
 """Unit tests for render.py"""
 
+import copy
+import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,6 +36,7 @@ from render import (
     scan_annotations,
     scan_template_variables,
     update_docs,
+    validate_cluster_topology,
     write_output,
 )
 
@@ -40,6 +44,12 @@ from render import (
 PROJECT_ROOT = Path(__file__).parent.parent
 REAL_TEMPLATES_DIR = PROJECT_ROOT / "config" / "templates"
 REAL_ARGOCD_CONFIG_DIR = PROJECT_ROOT / "argocd" / "config"
+
+
+# Prow sets BUILD_ID, which build_context reads as CI mode. Tests opt in explicitly.
+@pytest.fixture(autouse=True)
+def _no_ci_build_id(monkeypatch):
+    monkeypatch.delenv("BUILD_ID", raising=False)
 
 
 def _create_config_structure(
@@ -64,6 +74,7 @@ def _create_config_structure(
 
     # Start with base required fields (mirrors real config/defaults.yaml)
     base_defaults = {
+        "platform_image": "example.invalid/platform:test",
         "aws": {
             "account_id": "",
             "management_cluster_account_id": "000000000000",
@@ -80,6 +91,18 @@ def _create_config_structure(
         "regional_cluster": {
             "enable_bastion": False,
             "node_instance_families": ["m8i", "m7i"],
+            "zoa_lambda_image_tag": "dd76a96",
+            "zoa_runner_image_tag": "dd76a96",
+            "zoa_boundary_image_tag": "dd76a96",
+            "zoa_lambda_source_image": "quay.io/rrp-dev-ci/zoa-lambda",
+            "zoa_runner_source_image": "quay.io/rrp-dev-ci/zoa-runner",
+            "zoa_boundary_source_image": "quay.io/rrp-dev-ci/zoa-boundary",
+            "zoa_boundary_session_idle_timeout_seconds": 3600,
+            "zoa_boundary_session_stale_creating_seconds": 900,
+            "zoa_boundary_session_max_duration_hours": 4,
+            "zoa_lambda_api_concurrency": 50,
+            "zoa_lambda_worker_concurrency": 10,
+            "zoa_lambda_access_concurrency": 10,
         },
         "management_cluster_defaults": {
             "enable_bastion": False,
@@ -749,6 +772,27 @@ class TestBuildContext:
         ctx = build_context(merged, "prod", "eu-west-1", "")
         assert ctx["terraform_tags"]["region"] == "eu-west-1"
 
+    def test_write_sre_tools_true_raises_for_non_ephemeral(self):
+        merged = {"regional_cluster": {"enable_write_sre_tools": True}}
+        with pytest.raises(ValueError, match="can only be true for ephemeral"):
+            build_context(merged, "integration", "us-east-1", "")
+
+    def test_write_sre_tools_true_raises_for_production(self):
+        merged = {"regional_cluster": {"enable_write_sre_tools": True}}
+        with pytest.raises(ValueError, match="can only be true for ephemeral"):
+            build_context(merged, "production", "us-east-1", "")
+
+    def test_write_sre_tools_true_allowed_for_ephemeral(self):
+        merged = {"regional_cluster": {"enable_write_sre_tools": True}}
+        ctx = build_context(merged, "ephemeral", "us-east-1", "xg4y")
+        assert ctx["regional_cluster"]["enable_write_sre_tools"] is True
+
+    def test_write_sre_tools_false_allowed_for_any_environment(self):
+        for env in ["integration", "production", "ephemeral"]:
+            merged = {"regional_cluster": {"enable_write_sre_tools": False}}
+            ctx = build_context(merged, env, "us-east-1", "")
+            assert ctx["regional_cluster"]["enable_write_sre_tools"] is False
+
 
 # =============================================================================
 # build_mc_list
@@ -769,6 +813,24 @@ class TestBuildMcList:
         ctx = build_context(merged, "staging", "us-east-1", "xg4y")
         mc_list = build_mc_list(ctx, merged, "xg4y")
         assert mc_list[0]["management_id"] == "xg4y-mc01"
+
+    def test_shared_ids_do_not_duplicate_suffixes(self):
+        merged = {
+            "provision_mcs": {"mc01": {"account_id": "111"}},
+        }
+        ctx = build_context(merged, "staging", "us-east-1", "")
+        mc_list = build_mc_list(ctx, merged, "")
+
+        assert ctx["regional_id"] == "regional"
+        assert mc_list[0]["management_id"] == "mc01"
+
+    def test_ephemeral_ids_keep_prefix(self):
+        merged = {"provision_mcs": {"mc01": {"account_id": "111"}}}
+        ctx = build_context(merged, "ephemeral", "us-east-1", "beb87f69")
+        mc_list = build_mc_list(ctx, merged, "beb87f69")
+
+        assert ctx["regional_id"] == "beb87f69-regional"
+        assert mc_list[0]["management_id"] == "beb87f69-mc01"
 
     def test_default_account_id(self):
         merged = {
@@ -798,12 +860,54 @@ class TestBuildMcList:
         assert mc_list[0]["account_id"] == "mc-mc01-us-east-1"
 
 
+class TestClusterTopologyValidation:
+    def test_rejects_duplicate_rc_and_mc_ids(self):
+        merged = {
+            "provision_mcs": {"mc01": {"account_id": "111"}},
+            "aws": {"management_cluster_account_id": "222"},
+            "cluster_naming": {
+                "rc_pattern": "{prefix}-cluster",
+                "mc_pattern": "{prefix}-cluster",
+            },
+        }
+        ctx = build_context(merged, "integration", "us-east-1", "")
+        mc_list = build_mc_list(ctx, merged, "")
+
+        with pytest.raises(ValueError, match="used by both"):
+            validate_cluster_topology(merged, ctx, mc_list, "integration", "us-east-1")
+
+    def test_rejects_missing_mc_account(self):
+        merged = {"provision_mcs": {"mc01": {}}}
+        ctx = build_context(merged, "integration", "us-east-1", "")
+        mc_list = build_mc_list(ctx, merged, "")
+        mc_list[0].pop("account_id", None)
+
+        with pytest.raises(ValueError, match="no account_id"):
+            validate_cluster_topology(merged, ctx, mc_list, "integration", "us-east-1")
+
+
 # =============================================================================
 # cleanup_stale_files
 # =============================================================================
 
 
 class TestCleanupStaleFiles:
+    def test_removes_orphaned_input_directories_after_template_rename(self, tmp_path):
+        region_dir = tmp_path / "staging" / "us-east-1"
+        for name in ("obsolete-cluster-inputs", "pipeline-regional-cluster-inputs", "argocd-bootstrap-regional-cluster"):
+            (region_dir / name).mkdir(parents=True)
+
+        cleanup_stale_files(
+            valid_envs={"staging"},
+            env_regions={"staging": {"us-east-1"}},
+            env_region_mcs={"staging": {"us-east-1": set()}},
+            deploy_dir=tmp_path,
+        )
+
+        assert not (region_dir / "obsolete-cluster-inputs").exists()
+        assert (region_dir / "pipeline-regional-cluster-inputs").is_dir()
+        assert (region_dir / "argocd-bootstrap-regional-cluster").is_dir()
+
     def test_removes_stale_environment(self, tmp_path):
         deploy_dir = tmp_path / "deploy"
         stale_dir = deploy_dir / "old-env" / "us-east-1"
@@ -1528,6 +1632,45 @@ class TestMainIntegration:
         assert data["region"] == "us-east-1"
         assert data["_generated"].startswith("DO NOT EDIT")
 
+    def test_ephemeral_ci_omits_zoa_suffixes_in_regional_terraform_json(
+        self, tmp_path, monkeypatch
+    ):
+        """CI ephemeral (EPH_PREFIX + BUILD_ID) must not trust operator suffixes in ci00 central."""
+        monkeypatch.setenv("BUILD_ID", "prow-123")
+        deploy_dir = self._run_main(
+            tmp_path,
+            global_defaults={
+                "aws": {
+                    "account_id": "111111111111",
+                    "zoa_access_trusted_assumer_role_name_suffixes": [
+                        "rosa-seaplane-zoa-operator-dev",
+                    ],
+                },
+                "terraform_common": {
+                    "app_code": "infra",
+                    "service_phase": "dev",
+                    "cost_center": "000",
+                    "enable_bastion": False,
+                },
+            },
+            environments={
+                "ephemeral": {
+                    "defaults": {},
+                    "regions": {"us-east-1": {"provision_mcs": {}}},
+                }
+            },
+            eph_prefix="abc123",
+        )
+        tf_file = (
+            deploy_dir
+            / "ephemeral"
+            / "us-east-1"
+            / "pipeline-regional-cluster-inputs"
+            / "terraform.json"
+        )
+        data = json.loads(tf_file.read_text())
+        assert data["zoa_access_trusted_assumer_role_name_suffixes"] == []
+
     def test_pipeline_management_cluster_inputs_terraform_json(self, tmp_path):
         deploy_dir = self._run_main(
             tmp_path,
@@ -1995,6 +2138,124 @@ class TestMainIntegration:
         data = yaml.safe_load(config_file.read_text())
         assert data["terraform_tags"]["app_code"] == "test"
 
+    def test_write_sre_tools_false_renders_readonly_overlay(self, tmp_path):
+        """When false, overlay sets Grafana Viewer role and ArgoCD read-only."""
+        sre_tools_applications = {
+            "applications": {
+                "regional-cluster": {
+                    "grafana": {
+                        "grafana.ini": {
+                            "auth.anonymous": {
+                                "org_role": "{% if regional_cluster.enable_write_sre_tools %}Admin{% else %}Viewer{% endif %}",
+                            },
+                            "users": {
+                                "auto_assign_org_role": "{% if regional_cluster.enable_write_sre_tools %}Admin{% else %}Viewer{% endif %}",
+                            },
+                        },
+                    },
+                    "argo-cd": {
+                        "configs": {
+                            "cm": {
+                                "admin.enabled": "{% if regional_cluster.enable_write_sre_tools %}true{% else %}false{% endif %}",
+                                "users.anonymous.enabled": "{% if regional_cluster.enable_write_sre_tools %}false{% else %}true{% endif %}",
+                            },
+                            "rbac": {
+                                "policy.default": "{% if regional_cluster.enable_write_sre_tools %}{% else %}role:readonly{% endif %}",
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        deploy_dir = self._run_main(
+            tmp_path,
+            global_defaults={
+                "regional_cluster": {"enable_write_sre_tools": False},
+                **sre_tools_applications,
+            },
+            environments={
+                "staging": {
+                    "defaults": {},
+                    "regions": {"us-east-1": {"provision_mcs": {}}},
+                }
+            },
+        )
+        values = yaml.safe_load(
+            (deploy_dir / "staging" / "us-east-1" / "argocd-values-regional-cluster.yaml").read_text()
+        )
+        assert values["grafana"]["grafana.ini"]["auth.anonymous"]["org_role"] == "Viewer"
+        assert values["grafana"]["grafana.ini"]["users"]["auto_assign_org_role"] == "Viewer"
+        assert values["argo-cd"]["configs"]["cm"]["admin.enabled"] == "false"
+        assert values["argo-cd"]["configs"]["cm"]["users.anonymous.enabled"] == "true"
+        assert values["argo-cd"]["configs"]["rbac"]["policy.default"] == "role:readonly"
+
+    def test_write_sre_tools_true_renders_admin_overlay_for_ephemeral(self, tmp_path):
+        """When true (ephemeral only), overlay sets Grafana Admin and ArgoCD admin enabled."""
+        sre_tools_applications = {
+            "applications": {
+                "regional-cluster": {
+                    "grafana": {
+                        "grafana.ini": {
+                            "auth.anonymous": {
+                                "org_role": "{% if regional_cluster.enable_write_sre_tools %}Admin{% else %}Viewer{% endif %}",
+                            },
+                            "users": {
+                                "auto_assign_org_role": "{% if regional_cluster.enable_write_sre_tools %}Admin{% else %}Viewer{% endif %}",
+                            },
+                        },
+                    },
+                    "argo-cd": {
+                        "configs": {
+                            "cm": {
+                                "admin.enabled": "{% if regional_cluster.enable_write_sre_tools %}true{% else %}false{% endif %}",
+                                "users.anonymous.enabled": "{% if regional_cluster.enable_write_sre_tools %}false{% else %}true{% endif %}",
+                            },
+                            "rbac": {
+                                "policy.default": "{% if regional_cluster.enable_write_sre_tools %}{% else %}role:readonly{% endif %}",
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        deploy_dir = self._run_main(
+            tmp_path,
+            global_defaults={
+                "regional_cluster": {"enable_write_sre_tools": True},
+                **sre_tools_applications,
+            },
+            environments={
+                "ephemeral": {
+                    "defaults": {},
+                    "regions": {"us-east-1": {"provision_mcs": {}}},
+                }
+            },
+        )
+        values = yaml.safe_load(
+            (deploy_dir / "ephemeral" / "us-east-1" / "argocd-values-regional-cluster.yaml").read_text()
+        )
+        assert values["grafana"]["grafana.ini"]["auth.anonymous"]["org_role"] == "Admin"
+        assert values["grafana"]["grafana.ini"]["users"]["auto_assign_org_role"] == "Admin"
+        assert values["argo-cd"]["configs"]["cm"]["admin.enabled"] == "true"
+        assert values["argo-cd"]["configs"]["cm"]["users.anonymous.enabled"] == "false"
+        assert values["argo-cd"]["configs"]["rbac"]["policy.default"] == ""
+
+    def test_write_sre_tools_true_rejected_for_non_ephemeral(self, tmp_path):
+        """render.py must fail if flag is true for a non-ephemeral environment."""
+        with pytest.raises(ValueError, match="can only be true for ephemeral"):
+            self._run_main(
+                tmp_path,
+                global_defaults={
+                    "regional_cluster": {"enable_write_sre_tools": True},
+                },
+                environments={
+                    "integration": {
+                        "defaults": {},
+                        "regions": {"us-east-1": {"provision_mcs": {}}},
+                    }
+                },
+            )
+
 
 # =============================================================================
 # Documentation system tests
@@ -2066,6 +2327,30 @@ class TestScanTemplateVariables:
         (sub / "test.j2").write_text("{{ dns.domain }}")
         result = scan_template_variables(tpl_dir)
         assert result["dns.domain"] == ["sub/test.j2"]
+
+    def test_ignores_double_quoted_go_template(self, tmp_path):
+        """Go template keywords inside a double-quoted string literal must not be
+        reported, but real Jinja variables should still be detected."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "test.j2").write_text('{{ real_var }} and {{ "{{ if .foo }}X{{ else }}Y{{ end }}" }}')
+        result = scan_template_variables(tpl_dir)
+        assert result == {"real_var": ["test.j2"]}
+        assert "if" not in result
+        assert "else" not in result
+        assert "end" not in result
+
+    def test_ignores_single_quoted_go_template_else_end(self, tmp_path):
+        """Go template keywords inside a single-quoted string literal must not be
+        reported, but real Jinja variables should still be detected."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "test.j2").write_text("{{ another_var }} and {{ '{{ if .foo }}X{{ else }}Y{{ end }}' }}")
+        result = scan_template_variables(tpl_dir)
+        assert result == {"another_var": ["test.j2"]}
+        assert "if" not in result
+        assert "else" not in result
+        assert "end" not in result
 
 
 class TestCollectLeafPaths:
@@ -2221,6 +2506,321 @@ class TestUpdateDocs:
         update_docs(config, tpl)
         content = (config / "defaults.yaml").read_text()
         assert "My custom description" in content
+
+
+AUTHZ_BUNDLE = '''formatVersion: 1
+registeredAccounts: ["012345678901"]
+policies:
+  - id: read-clusters
+    ownerAccountID: "012345678901"
+    content: |
+      permit(principal, action in Seaplane::Action::"ReadOnly", resource)
+      when { context.region == "us-east-1" && context.accountId == "012345678901" };
+attachments:
+  - id: readers
+    policyID: read-clusters
+    principalARN: arn:aws:iam::012345678901:role/platform/readers
+    scope: regional
+    region: us-east-1
+'''
+AUTHZ_EXAMPLE = PROJECT_ROOT / "docs" / "examples" / "authz-dev"
+PLATFORM_CHART = REAL_ARGOCD_CONFIG_DIR / "regional-cluster" / "platform-api"
+
+
+def _authz_values(tmp_path, env, overrides=None, eph_prefix="", region="us-east-1"):
+    defaults = load_yaml(PROJECT_ROOT / "config" / "defaults.yaml")
+    env_defaults = load_yaml(PROJECT_ROOT / "config" / env / "defaults.yaml")
+    deploy = TestMainIntegration()._run_main(
+        tmp_path,
+        defaults,
+        {env: {
+            "defaults": deep_merge(env_defaults, overrides or {}),
+            "regions": {region: {"provision_mcs": {"mc01": {}}}},
+        }},
+        eph_prefix,
+    )
+    return load_yaml(deploy / env / region / "argocd-values-regional-cluster.yaml")
+
+
+def _helm_platform(tmp_path, overrides):
+    helm = shutil.which("helm")
+    assert helm, "Helm is required for authz delivery checks. Use the CI-pinned CLI."
+    values = tmp_path / "helm-values.yaml"
+    overrides = copy.deepcopy(overrides)
+    overrides.setdefault("global", {}).setdefault("aws_region", "us-east-1")
+    # Quote strings explicitly: PyYAML treats 012345678901 as a string while
+    # Helm's YAML decoder may coerce an unquoted decimal containing 8 or 9.
+    values.write_text(yaml.safe_dump(overrides, default_style='"'))
+    rendered = subprocess.run(
+        [helm, "template", "authz-test", str(PLATFORM_CHART), "-f", str(values)],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    resources = list(yaml.safe_load_all(rendered))
+    return resources, rendered
+
+
+def _resource(resources, kind, name):
+    return next(r for r in resources if r["kind"] == kind and r["metadata"]["name"] == name)
+
+
+def _assert_bundle_fields(bundle):
+    # Bundles carry no service-operator domain; MCs register at startup instead.
+    assert set(bundle) == {"formatVersion", "registeredAccounts", "policies", "attachments"}
+    assert bundle["formatVersion"] == 1
+
+
+def _assert_rc_grants(bundle, account, role):
+    # Every env grants the identities behind rrp-rc: the child-admin role and CI's e2e user.
+    assert [p["id"] for p in bundle["policies"]] == ["rc-all-actions"]
+    assert [a["principalARN"] for a in bundle["attachments"]] == [
+        f"arn:aws:iam::{account}:role/{role}", f"arn:aws:iam::{account}:user/e2e",
+    ]
+
+
+class TestAuthzDelivery:
+    @pytest.mark.parametrize("env,ci,eph_prefix,role", [
+        ("integration", False, "", "OrganizationAccountAccessRole"),
+        ("stage", False, "", "rosa-seaplane-account-admin"),
+        ("ephemeral", False, "", "OrganizationAccountAccessRole"),
+        ("ephemeral", False, "authz-test", "OrganizationAccountAccessRole"),
+        ("ephemeral", True, "", "OrganizationAccountAccessRole"),
+    ])
+    def test_safe_source_defaults(self, tmp_path, monkeypatch, env, ci, eph_prefix, role):
+        monkeypatch.setenv("BUILD_ID", "test-ci" if ci else "")
+        values = _authz_values(tmp_path, env, eph_prefix=eph_prefix)
+        authz = values["platformApi"]["authz"]
+        assert set(authz) == {"config"}
+        bundle = yaml.safe_load(authz["config"])
+        assert bundle["registeredAccounts"] == ["@@AWS_ACCOUNT_ID@@"]
+        _assert_rc_grants(bundle, "@@AWS_ACCOUNT_ID@@", role)
+        _assert_bundle_fields(bundle)
+
+    @pytest.mark.parametrize("principal,scope", [
+        ("role", "regional"), ("session", "global"),
+        ("deny-all", "regional"),
+    ])
+    def test_bundle_passes_through(self, tmp_path, monkeypatch, principal, scope):
+        monkeypatch.setenv("BUILD_ID", "test-ci")
+        content = AUTHZ_BUNDLE
+        if principal == "deny-all":
+            content = "formatVersion: 1\nregisteredAccounts: []\npolicies: []\nattachments: []\n"
+        if scope == "global":
+            content = content.replace("scope: regional\n    region: us-east-1", "scope: global")
+            content = content.replace("iam::012345678901:role/platform/readers",
+                                      "sts::012345678901:assumed-role/readers/session-a")
+        bundle = yaml.safe_load(content)
+        overrides = {"applications": {"regional-cluster": {"platformApi": {
+            "authz": {"config": content},
+        }}}}
+        overrides["aws"] = {"account_id": "987654321098"}
+        values = _authz_values(tmp_path, "ephemeral", overrides, eph_prefix="authz-test")
+        assert values["platformApi"]["authz"] == {"config": content.removesuffix("\n")}
+        resources, _ = _helm_platform(tmp_path, values)
+        config = _resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"]
+        assert config == content
+        assert yaml.safe_load(config) == bundle
+        assert yaml.safe_load(config)["registeredAccounts"] == ([] if principal == "deny-all" else ["012345678901"])
+
+    def test_dev_override(self, tmp_path):
+        # The example replaces the whole bundle and names no account; Helm supplies the RC account.
+        overrides = load_yaml(AUTHZ_EXAMPLE / "defaults.yaml")
+        assert load_yaml(AUTHZ_EXAMPLE / "us-east-1.yaml") == {"provision_mcs": {"mc01": {}}}
+        values = _authz_values(tmp_path, "ephemeral", overrides)
+        values["global"] = {"aws_account_id": "012345678901", "aws_region": "us-east-1"}
+        resources, _ = _helm_platform(tmp_path, values)
+        bundle = yaml.safe_load(_resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"])
+        _assert_bundle_fields(bundle)
+        assert bundle["registeredAccounts"] == ["012345678901"]
+        assert [p["id"] for p in bundle["policies"]] == ["rc-all-actions", "dev-read-only"]
+        assert [a["principalARN"] for a in bundle["attachments"]] == [
+            "arn:aws:iam::012345678901:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::012345678901:user/e2e",
+            "arn:aws:iam::012345678901:role/dev-readers",
+        ]
+
+    @pytest.mark.parametrize("rate_enabled", [False, True])
+    def test_mount_inputs_metrics(self, tmp_path, rate_enabled):
+        resources, rendered = _helm_platform(tmp_path, {"platformApi": {
+            "rateLimit": {"enabled": rate_enabled},
+        }})
+        bundle = _resource(resources, "ConfigMap", "authz-config")
+        mounted = yaml.safe_load(bundle["data"]["config.yaml"])
+        assert mounted == {
+            "formatVersion": 1, "registeredAccounts": [], "policies": [], "attachments": [],
+        }
+        deployment = _resource(resources, "Deployment", "platform-api")
+        pod = deployment["spec"]["template"]
+        app = next(c for c in pod["spec"]["containers"] if c["name"] == "platform-api")
+        env = {e["name"]: e.get("value") for e in app["env"]}
+        assert "AUTHZ_RESOLVER" not in env
+        assert env["AUTHZ_CONFIG_FILE"] == "/etc/platform-api/authz/config.yaml"
+        mounts = {m["name"]: m for m in app["volumeMounts"]}
+        assert mounts["authz-config"] == {
+            "name": "authz-config", "mountPath": "/etc/platform-api/authz", "readOnly": True,
+        }
+        volumes = {v["name"]: v for v in pod["spec"]["volumes"]}
+        assert volumes["authz-config"]["configMap"] == {"name": "authz-config", "defaultMode": 0o644}
+        assert "defaultMode: 0644" in rendered
+        config_text = next(part.split("\n", 1)[1] for part in rendered.split("---\n")
+                           if part.startswith("# Source:") and "/authz-configmap.yaml\n" in part)
+        annotations = pod["metadata"]["annotations"]
+        # Helm trims the terminal indented blank line from printed manifests, not include.
+        assert annotations["checksum/authz-config"] == hashlib.sha256((config_text + "    \n").encode()).hexdigest()
+        assert ("rate-limits" in mounts) == ("rate-limits" in volumes) == rate_enabled
+        assert ("checksum/rate-limits" in annotations) == rate_enabled
+        assert ("RATE_LIMIT_CONFIG_FILE" in env) == rate_enabled
+        if rate_enabled:
+            assert mounts["rate-limits"]["readOnly"] is True
+            assert mounts["rate-limits"]["mountPath"] == "/etc/platform-api/rate-limits"
+            assert env["RATE_LIMIT_CONFIG_FILE"] == "/etc/platform-api/rate-limits/limits.yaml"
+            assert _resource(resources, "ConfigMap", "rate-limits")["data"]["limits.yaml"]
+        assert set(volumes) == {"authz-config"} | ({"rate-limits"} if rate_enabled else set())
+        service = _resource(resources, "Service", "platform-api")
+        monitor = _resource(resources, "ServiceMonitor", "platform-api")
+        port = next(p for p in app["ports"] if p["name"] == "metrics")
+        service_port = next(p for p in service["spec"]["ports"] if p["name"] == "metrics")
+        assert port["containerPort"] == service_port["port"] == 9090
+        assert service_port["targetPort"] == monitor["spec"]["endpoints"][0]["port"] == "metrics"
+        assert monitor["spec"]["endpoints"][0].get("path", "/metrics") == "/metrics"
+        assert monitor["spec"]["selector"]["matchLabels"] == service["metadata"]["labels"]
+        assert monitor["spec"]["namespaceSelector"]["matchNames"] == [service["metadata"]["namespace"]]
+
+    @pytest.mark.parametrize("change", ["registeredAccounts", "policies", "attachments", "namespace"])
+    def test_complete_checksum(self, tmp_path, change):
+        values = {"platformApi": {"authz": {"config": AUTHZ_BUNDLE}}}
+        before, _ = _helm_platform(tmp_path, values)
+        changed = copy.deepcopy(values)
+        if change == "namespace":
+            changed["platformApi"]["namespace"] = "other-platform-api"
+        else:
+            if change == "registeredAccounts":
+                content = AUTHZ_BUNDLE.replace('["012345678901"]', '["012345678901", "999999999999"]')
+            elif change == "policies":
+                content = AUTHZ_BUNDLE.replace('context.region == "us-east-1"', 'context.region == "us-west-2"')
+            else:
+                content = AUTHZ_BUNDLE.replace("role/platform/readers", "role/platform/others")
+            changed["platformApi"]["authz"]["config"] = content
+        after, _ = _helm_platform(tmp_path, changed)
+        def annotations(resources):
+            return _resource(resources, "Deployment", "platform-api")["spec"]["template"]["metadata"]["annotations"]
+        assert annotations(before)["checksum/authz-config"] != annotations(after)["checksum/authz-config"]
+        if change == "namespace":
+            assert annotations(before)["checksum/rate-limits"] != annotations(after)["checksum/rate-limits"]
+        else:
+            assert annotations(before)["checksum/rate-limits"] == annotations(after)["checksum/rate-limits"]
+
+    def test_mandatory_inputs(self, tmp_path):
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            _helm_platform(tmp_path, {"platformApi": {"authz": {"config": ""}}})
+        assert "platformApi.authz.config is required" in failure.value.stderr
+
+
+class TestRuntimeIdentityDelivery:
+    def test_runtime_complete_bundle(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BUILD_ID", raising=False)
+        values = _authz_values(tmp_path, "ephemeral", {
+            "aws": {"account_id": "012345678901", "child_admin_role_name": "platform/Provisioner"},
+        }, eph_prefix="authz-test")
+        values["global"] = {"aws_account_id": "012345678901", "aws_region": "us-east-1"}
+        resources, _ = _helm_platform(tmp_path, values)
+        bundle = yaml.safe_load(_resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"])
+        assert bundle["registeredAccounts"] == ["012345678901"]
+        _assert_rc_grants(bundle, "012345678901", "platform/Provisioner")
+        _assert_bundle_fields(bundle)
+
+    @pytest.mark.parametrize("env", ["ephemeral", "integration", "stage"])
+    def test_runtime_delivery(self, tmp_path, env):
+        values = _authz_values(tmp_path, env)
+        assert set(values["platformApi"]["authz"]) == {"config"}
+        assert "ssm:///" not in values["platformApi"]["authz"]["config"]
+        values["global"] = {"aws_account_id": "012345678901", "aws_region": "us-east-1"}
+        resources, _ = _helm_platform(tmp_path, values)
+        config = _resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"]
+        assert config == values["platformApi"]["authz"]["config"].replace(
+            "@@AWS_ACCOUNT_ID@@", "012345678901",
+        ).replace("@@AWS_REGION@@", "us-east-1") + "\n"
+        bundle = yaml.safe_load(config)
+        assert bundle["registeredAccounts"] == ["012345678901"]
+        _assert_rc_grants(bundle, "012345678901", "rosa-seaplane-account-admin" if env == "stage" else "OrganizationAccountAccessRole")
+        _assert_bundle_fields(bundle)
+
+    @pytest.mark.parametrize("field,invalid", [
+        ("aws_account_id", ""), ("aws_account_id", None),
+        ("aws_account_id", "ssm:///account"), ("aws_account_id", "123"),
+        ("aws_account_id", "1234567890123"), ("aws_account_id", "１２３４５６７８９０１２"),
+        ("aws_account_id", "012345678901\n"), ("aws_account_id", 123456789012),
+        ("aws_account_id", True), ("aws_account_id", ["012345678901"]),
+        ("aws_region", ""), ("aws_region", None), ("aws_region", "bad"),
+        ("aws_region", "US-east-1"), ("aws_region", "us-east-1\n"),
+        ("aws_region", 123), ("aws_region", ["us-east-1"]),
+    ])
+    def test_invalid_identity_fails(self, tmp_path, field, invalid):
+        values = {"platformApi": {"authz": {"config": "# @@AWS_ACCOUNT_ID@@ @@AWS_REGION@@\n"}}}
+        values["global"] = {"aws_account_id": "012345678901", "aws_region": "us-east-1"}
+        values["global"][field] = invalid
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            _helm_platform(tmp_path, values)
+        assert f"global.{field} must be" in failure.value.stderr
+
+    @pytest.mark.parametrize("marker,globals,expected", [
+        ("@@AWS_ACCOUNT_ID@@", {"aws_account_id": "012345678901", "aws_region": "bad"}, "012345678901"),
+        ("@@AWS_REGION@@", {"aws_account_id": 123, "aws_region": "eu-west-2"}, "eu-west-2"),
+    ])
+    def test_only_used_identity_validated(self, tmp_path, marker, globals, expected):
+        resources, _ = _helm_platform(tmp_path, {
+            "global": globals, "platformApi": {"authz": {"config": f"# {marker}\n"}},
+        })
+        assert _resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"] == f"# {expected}\n"
+
+    def test_preserves_explicit_records(self, tmp_path):
+        bundle = yaml.safe_load(AUTHZ_BUNDLE)
+        content = yaml.safe_dump(bundle, default_style='"')
+        resources, _ = _helm_platform(tmp_path, {
+            "global": {"aws_account_id": "ssm:///account", "aws_region": "invalid"},
+            "platformApi": {"authz": {"config": content}},
+        })
+        actual = _resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"]
+        assert actual == content
+        assert yaml.safe_load(actual) == bundle
+
+    @pytest.mark.parametrize("change", ["duplicateAccounts", "duplicatePolicies", "duplicateAttachments", "nullPolicies"])
+    def test_preserves_invalid_records(self, tmp_path, change):
+        bundle = yaml.safe_load(AUTHZ_BUNDLE)
+        if change == "duplicateAccounts":
+            bundle["registeredAccounts"] *= 2
+        elif change == "duplicatePolicies":
+            bundle["policies"] *= 2
+        elif change == "duplicateAttachments":
+            bundle["attachments"] *= 2
+        else:
+            bundle["policies"] = None
+        content = yaml.safe_dump(bundle, default_style='"')
+        resources, _ = _helm_platform(tmp_path, {"platformApi": {"authz": {"config": content}}})
+        assert _resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"] == content
+
+    @pytest.mark.parametrize("content", [
+        'formatVersion: 1\nregisteredAccounts: ["@@AWS_ACCOUNT_ID@@"]\nregisteredAccounts: []\n',
+        'formatVersion: 1\npolicies:\n  - id: first\n    id: second\n    ownerAccountID: "@@AWS_ACCOUNT_ID@@"\n',
+        'formatVersion: 1\npolicies: [\n# @@AWS_ACCOUNT_ID@@ @@AWS_REGION@@\n',
+        'formatVersion: 1\n# {{ .Values.global.aws_account_id }}\n# @@AWS_ACCOUNT_ID@@ @@AWS_REGION@@\n',
+    ])
+    def test_preserves_original_syntax(self, tmp_path, content):
+        resources, _ = _helm_platform(tmp_path, {
+            "global": {"aws_account_id": "012345678901", "aws_region": "us-east-1"},
+            "platformApi": {"authz": {"config": content}},
+        })
+        actual = _resource(resources, "ConfigMap", "authz-config")["data"]["config.yaml"]
+        assert actual == content.replace("@@AWS_ACCOUNT_ID@@", "012345678901").replace("@@AWS_REGION@@", "us-east-1")
+
+    def test_account_changes_checksum(self, tmp_path):
+        values = _authz_values(tmp_path, "stage")
+        values["global"] = {"aws_account_id": "012345678901", "aws_region": "us-east-1"}
+        before, _ = _helm_platform(tmp_path, values)
+        values["global"]["aws_account_id"] = "987654321098"
+        after, _ = _helm_platform(tmp_path, values)
+        annotation = lambda resources: _resource(resources, "Deployment", "platform-api")["spec"]["template"]["metadata"]["annotations"]
+        assert annotation(before)["checksum/authz-config"] != annotation(after)["checksum/authz-config"]
+        assert annotation(before)["checksum/rate-limits"] == annotation(after)["checksum/rate-limits"]
 
 
 if __name__ == "__main__":

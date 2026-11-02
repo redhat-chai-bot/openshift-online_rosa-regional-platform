@@ -18,21 +18,15 @@ resource "aws_lb" "platform" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = var.private_subnet_ids
 
-  tags = {
+  tags = merge(local.common_tags, {
     Name = "${var.regional_id}-api"
-  }
+  })
 }
 
 # -----------------------------------------------------------------------------
 # Target Group
 #
-# Uses IP target type for TargetGroupBinding compatibility.
-# EKS Auto Mode will register pod IPs when the TargetGroupBinding resource
-# is created in Kubernetes.
-#
-# IMPORTANT: The eks:eks-cluster-name tag is REQUIRED for EKS Auto Mode.
-# The AmazonEKSLoadBalancingPolicy has a condition that only allows
-# RegisterTargets on target groups tagged with the cluster name.
+# Uses IP target type so LBC TargetGroupBindings register pod IPs directly.
 # -----------------------------------------------------------------------------
 
 resource "aws_lb_target_group" "platform" {
@@ -54,10 +48,10 @@ resource "aws_lb_target_group" "platform" {
     matcher             = "200"
   }
 
-  tags = {
+  tags = merge(local.common_tags, {
     Name                   = "${var.regional_id}-api"
     "eks:eks-cluster-name" = var.cluster_name
-  }
+  })
 }
 
 # -----------------------------------------------------------------------------
@@ -68,6 +62,7 @@ resource "aws_lb_listener" "platform" {
   load_balancer_arn = aws_lb.platform.arn
   port              = 80
   protocol          = "HTTP"
+  tags              = local.common_tags
 
   default_action {
     type             = "forward"
