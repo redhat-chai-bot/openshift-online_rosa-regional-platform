@@ -1,10 +1,10 @@
 # Milestone 4: Building a Regional Observability Platform
 
-_ROSA Regional Platform — Observability and Alerting_
+_ROSA Seaplane — Observability and Alerting_
 
 ## Introduction
 
-When we set out to build observability for the ROSA Regional Platform, we faced a fundamental constraint: each AWS region operates independently with its own EKS-based Regional Cluster (RC) and a fleet of Management Clusters (MCs) running across separate AWS accounts. There is no shared network, no centralized Prometheus, and no global control plane to lean on. Metrics, logs, and alerts all had to be solved regionally — from scratch.
+When we set out to build observability for the ROSA Seaplane, we faced a fundamental constraint: each AWS region operates independently with its own EKS-based Regional Cluster (RC) and a fleet of Management Clusters (MCs) running across separate AWS accounts. There is no shared network, no centralized Prometheus, and no global control plane to lean on. Metrics, logs, and alerts all had to be solved regionally — from scratch.
 
 We are pleased to announce that we have successfully completed Milestone 4 ([ROSA-669](https://redhat.atlassian.net/browse/ROSA-669)), which lays the foundation for our observability stack. This post covers the key areas we think are worth sharing more broadly: the **metrics and logging architecture** spanning both cluster types with secure cross-account transit, an **alerting architecture designed for multiple consumers**, and how we **validate the full pipeline end-to-end** in CI.
 
@@ -166,14 +166,14 @@ Combined with YACE exposing AWS metrics, this means an SRE can investigate infra
 
 ### HCP Availability Monitoring
 
-HCP availability is derived from the `KubeAPIServerAvailable` status condition on HostedCluster CRs, exported by kube-state-metrics CustomResourceState on Management Clusters and remote-written to Thanos on the RC. A recording rule (`hcp:hostedcluster_available`) converts this into a 0/1 gauge, with lifecycle-aware exclusions for clusters that are installing or being deleted. This feeds the SLA burn-rate alerts and HCP Health dashboards. External synthetic monitoring (probing customer API endpoints from outside the cluster) is planned as future work.
+HCP availability is derived from the `KubeAPIServerAvailable` status condition on HostedCluster CRs, exported by kube-state-metrics CustomResourceState on Management Clusters and remote-written to Thanos on the RC. A recording rule (`hcp:hostedcluster_available`) converts this into a 0/1 gauge. That gauge feeds the SLA burn-rate alerts. Install and delete notification suppression is Alertmanager silences, not a PromQL exclusion. The HCP Health dashboards still use lifecycle recording rules to separate installing and deleting clusters from unavailable ones. External synthetic monitoring (probing customer API endpoints from outside the cluster) is planned as future work.
 
 ### End-to-End Testing
 
 Observability is validated at two levels:
 
 - **E2E tests** query Thanos and Loki through the RHOBS API Gateway (the same SigV4-authenticated path used by production consumers) to validate that metrics and logs from both RC and MC are flowing through the full pipeline. These tests verify CloudWatch exporter metrics, Vector sink metrics, Loki distributor metrics, and log presence by `cluster_type` — covering the entire cross-account path end-to-end.
-- **Alerting rule unit tests** run `promtool test rules` in CI against every `PrometheusRule` CR, validating recording rule logic, alert firing conditions, and lifecycle suppression behavior.
+- **Alerting rule unit tests** run `promtool test rules` in CI against every `PrometheusRule` CR, validating recording rule logic and alert firing conditions. Install and delete suppression is Alertmanager behavior, not part of the PromQL under test.
 
 We also plan to run these same end-to-end tests as pre-merge checks in upstream repos, like hypershift-operator, so upstream teams can catch observability regressions before they ship.
 
@@ -189,4 +189,4 @@ We're also working with the RHOBS team to consume RHOBS-maintained images and pa
 
 ---
 
-_For questions or feedback, reach out in #team-rosa-regional-platform on Slack._
+_For questions or feedback, reach out in #team-rosa-seaplane on Slack._

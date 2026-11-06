@@ -117,21 +117,6 @@ output "log_collector_task_family" {
   value       = var.enable_bastion ? module.bastion[0].log_collector_task_family : null
 }
 
-output "maestro_agent_cert_secret_name" {
-  description = "Secret name for Maestro Agent MQTT certificate"
-  value       = module.maestro_agent.maestro_agent_cert_secret_name
-}
-
-output "maestro_agent_config_secret_name" {
-  description = "Secret name for Maestro Agent MQTT configuration"
-  value       = module.maestro_agent.maestro_agent_config_secret_name
-}
-
-output "maestro_agent_role_arn" {
-  description = "IAM role ARN for Maestro Agent"
-  value       = module.maestro_agent.maestro_agent_role_arn
-}
-
 # =============================================================================
 # HyperShift OIDC Outputs
 # =============================================================================
@@ -172,4 +157,36 @@ output "prometheus_role_arn" {
 output "cloudwatch_exporter_role_arn" {
   description = "IAM role ARN for CloudWatch Exporter (Pod Identity)"
   value       = module.cloudwatch_exporter.role_arn
+}
+# =============================================================================
+# kube-applier Outputs
+# =============================================================================
+
+output "kube_applier_role_arn" {
+  description = "IAM role ARN for the kube-applier-aws controller"
+  value       = module.kube_applier.kube_applier_role_arn
+}
+
+# =============================================================================
+# ZOA Outputs
+# =============================================================================
+
+output "zoa_api_function_url" {
+  description = "ZOA API Lambda Function URL (per-VPC endpoint for this MC)"
+  value       = module.zoa_lambda.api_function_url
+}
+
+output "zoa_boundary_ecs_cluster_arn" {
+  description = "ECS cluster ARN for ZOA boundary tasks (MC target registration)"
+  value       = module.zoa_lambda.boundary_ecs_cluster_arn
+}
+
+output "zoa_boundary_task_definition_arn" {
+  description = "Boundary task definition ARN (MC target registration)"
+  value       = module.zoa_lambda.boundary_task_definition_arn
+}
+
+output "zoa_boundary_security_group_id" {
+  description = "Boundary ECS security group (MC target registration)"
+  value       = module.zoa_lambda.boundary_security_group_id
 }

@@ -2,41 +2,22 @@
 
 ## CI/CD Pipelines
 
-For the full pipeline architecture, event triggers, and lifecycle diagrams, see [Pipeline-Based Lifecycle](../../docs/design/pipeline-based-lifecycle.md).
+For the current per-cluster pipeline architecture and lifecycle, see [CodePipeline Cluster Lifecycle](../../docs/design/codepipeline-cluster-lifecycle.md).
 
 ### `central-account-bootstrap/`
 
-Seeds the initial CodePipeline that watches the `deploy/` directory in the repository. After deploying, the GitHub CodeStar connection must be authorized manually in the AWS Console.
+Creates the shared CodeStar connection, artifact bucket, CodePipeline role, and CodeBuild roles. The connection must be authorized manually in the AWS Console. `scripts/provision-cluster-resources.sh` dynamically creates one CodePipeline and one CodeBuild project per RC or MC.
 
-### `pipeline-provisioner/`
+### `codebuild-regional-cluster/` and `codebuild-management-cluster/`
 
-Meta-pipeline that dynamically creates per-cluster CodePipelines when regional or management cluster JSON files are committed to `deploy/`.
-
-### `pipeline-regional-cluster/`
-
-Three-stage CodePipeline (validate → deploy → bootstrap) for provisioning a regional cluster. Created dynamically by the pipeline provisioner.
-
-### `pipeline-management-cluster/`
-
-Three-stage CodePipeline (validate → deploy → bootstrap) for provisioning a management cluster. Created dynamically by the pipeline provisioner.
+Contain the combined per-cluster buildspecs. Cluster pipeline and CodeBuild definitions are reconciled through AWS APIs; cluster infrastructure remains Terraform-managed.
 
 ## Cluster Infrastructure
 
 ### `regional-cluster/`
 
-Provisions the full regional cluster stack: EKS, VPC, API Gateway, Maestro IoT broker, RDS, authorization (DynamoDB + Pod Identity), ECS bootstrap, optional CloudTrail audit logging (disabled by default; enable with `enable_cloudtrail` for compliance environments), and optional bastion.
+Provisions the full regional cluster stack: EKS, VPC, API Gateway, kube-applier DynamoDB tables, RDS (seaplane-db), ECS bootstrap, optional CloudTrail audit logging (disabled by default; enable with `enable_cloudtrail` for compliance environments), and optional bastion.
 
 ### `management-cluster/`
 
-Provisions a management cluster: private EKS (1–2 nodes), ECS bootstrap, Maestro agent, and optional bastion. Hosts customer control planes.
-
-### `maestro-agent-iot-provisioning/`
-
-Standalone wrapper around the `maestro-agent-iot-provisioning` module for pipeline-based IoT provisioning. Provisions AWS IoT Core certificates and policies for Maestro agents in management clusters.
-
-Usage:
-
-1. Generate `terraform.tfvars` with cluster-specific values
-2. Run `terraform init && terraform apply`
-3. Extract certificate data: `terraform output -json certificate_data`
-4. Transfer to management account Secrets Manager
+Provisions a management cluster: private EKS (1–2 nodes), ECS bootstrap, kube-applier IAM, and optional bastion. Hosts customer control planes.

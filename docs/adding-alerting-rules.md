@@ -11,7 +11,8 @@ argocd/config/regional-cluster/alerting-rules/
 ├── Chart.yaml
 ├── values.yaml
 └── templates/
-    └── hcp-sla.yaml      # example: HCP availability SLA rules
+    ├── hcp-sla.yaml      # example: HCP availability SLA rules
+    └── zoa.yaml          # ZOA Lambda/EMF alerts (YACE gauges, not rate())
 ```
 
 Each template renders a `PrometheusRule` CR (`monitoring.coreos.com/v1`). You can group related rules in a single file or create separate files — one file per logical concern is the convention.
@@ -84,6 +85,8 @@ sla:
 ## Error Budget Burn Rate Pattern
 
 For SLA-based alerts, use multi-window, multi-burn-rate alerting as described in the [Google SRE Workbook — Alerting on SLOs](https://sre.google/workbook/alerting-on-slos/). See `templates/hcp-sla.yaml` for a working example with the HCP availability SLA.
+
+Do not exclude install or delete in PromQL. The hyperfleet-operator silence reconciler writes Alertmanager silences for those phases, matched on `namespace` and `name`. `HCPInstallTimeout15m` stays exempt during install. New SLA alerts must keep `namespace` and `name` so those silences match, and `cluster` for routing and dashboards.
 
 ## Testing with promtool
 

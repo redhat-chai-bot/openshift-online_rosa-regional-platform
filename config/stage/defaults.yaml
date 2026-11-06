@@ -1,0 +1,34 @@
+# Stage environment defaults.
+
+aws:
+  zoa_access_trusted_assumer_role_names:
+    - OrganizationAccountAccessRole
+  zoa_access_trusted_assumer_role_name_suffixes:
+    - rosa-seaplane-zoa-operator-stage
+
+dns:
+  domain: stg0.rosa.devshift.org
+
+terraform_tags:
+  app_code: "OSD-002"
+  service_phase: "stage"
+  cost_center: "732"
+
+regional_cluster:
+  enable_bastion: true
+  enable_cloudtrail: true
+  enable_api_custom_domain: true
+  enable_sre_tools_gateway: true
+  enable_sre_public_access: true
+  enable_sre_oidc_auth: true
+  sre_oidc_issuer_url: "https://auth.redhat.com/auth/realms/EmployeeIDP"
+  sre_grafana_oidc_client_id: "rosa-seaplane-grafana-sre-stg0-us-east-1"
+  sre_argocd_oidc_client_id: "rosa-seaplane-argocd-sre-stg0-us-east-1"
+  sre_prometheus_oidc_client_id: "rosa-seaplane-prometheus-sre-stg0-us-east-1"
+  sre_thanos_oidc_client_id: "rosa-seaplane-thanos-sre-stg0-us-east-1"
+
+cluster_lifecycle:
+  default_expiration: "24h"
+
+management_cluster_defaults:
+  enable_bastion: true

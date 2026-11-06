@@ -1,7 +1,3 @@
-cert-manager:
-  crds:
-    enabled: true
-    keep: true # Prevents Helm from deleting CRDs if the chart is uninstalled
-  prometheus:
-    servicemonitor:
-      enabled: true
+# Wrapper chart values. Jetstack operand values live in jetstack-values.yaml
+# (rendered via kustomize helmCharts, not as a Helm subchart).
+{}

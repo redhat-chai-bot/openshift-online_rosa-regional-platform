@@ -1,0 +1,16 @@
+{{- if .Values.monitoring.sre.targetGroup.arn }}
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: prometheus-sre
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # aws-load-balancer-controller CRD may not exist yet when ArgoCD dry-runs this resource
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  serviceRef:
+    name: monitoring-prometheus
+    port: 9090
+  targetGroupARN: {{ .Values.monitoring.sre.targetGroup.arn | quote }}
+  targetType: ip
+{{- end }}

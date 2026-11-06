@@ -4,7 +4,7 @@
 # dependencies = ["boto3", "PyYAML"]
 # ///
 """
-Ephemeral environment manager for ROSA Regional Platform.
+Ephemeral environment manager for ROSA Seaplane.
 
 Provisions an ephemeral environment or tears one down. Designed for multi-step
 CI pipelines where provision, tests, and teardown are separate steps:
@@ -60,22 +60,35 @@ def make_eph_prefix(env_id: str, externally_set: bool) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ephemeral environment manager for ROSA Regional Platform")
-    teardown_group = parser.add_mutually_exclusive_group()
-    teardown_group.add_argument(
+    parser = argparse.ArgumentParser(description="Ephemeral environment manager for ROSA Seaplane")
+    lifecycle_group = parser.add_mutually_exclusive_group()
+    lifecycle_group.add_argument(
         "--teardown",
         action="store_true",
         help="Tear down a previously provisioned ephemeral environment",
     )
-    teardown_group.add_argument(
+    lifecycle_group.add_argument(
         "--teardown-fire-and-forget",
         action="store_true",
-        help="Start teardown and exit immediately without waiting for completion",
+        help=(
+            "Start MC and RC teardown together, then exit without waiting "
+            "for completion"
+        ),
     )
-    teardown_group.add_argument(
+    parser.add_argument(
         "--resync",
         action="store_true",
-        help="Resync the ephemeral branch by rebasing onto the latest source branch",
+        help="With --teardown: sync CI branch from --branch then destroy. Alone: resync (apply).",
+    )
+    lifecycle_group.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume provisioning using an existing ephemeral branch",
+    )
+    parser.add_argument(
+        "--resync-before-resume",
+        action="store_true",
+        help="Resync the existing ephemeral branch before resuming provisioning",
     )
     parser.add_argument(
         "--id",
@@ -86,7 +99,7 @@ def main():
     )
     parser.add_argument(
         "--repo",
-        default=os.environ.get("REPOSITORY_URL", "openshift-online/rosa-regional-platform"),
+        default=os.environ.get("REPOSITORY_URL", "openshift-online/rosa-seaplane"),
         help="GitHub repository in owner/name format (default: from REPOSITORY_URL env var)",
     )
     parser.add_argument(
@@ -126,7 +139,18 @@ def main():
         metavar="PATH",
         help="Save RC terraform outputs (JSON) to PATH after provisioning",
     )
+    parser.add_argument(
+        "--save-management-state",
+        metavar="PATH",
+        help="Save MC terraform outputs (JSON) to PATH after provisioning",
+    )
     args = parser.parse_args()
+
+    if args.resync_before_resume and not args.resume:
+        parser.error("--resync-before-resume requires --resume")
+
+    if args.resume and args.resync:
+        parser.error("--resume uses --resync-before-resume, not --resync")
 
     # Normalize repo format (strip github.com prefix and .git suffix if present)
     repo = re.sub(r".*github\.com/", "", args.repo)
@@ -142,9 +166,9 @@ def main():
         env_id = os.environ["BUILD_ID"]
         externally_set = True
     else:
-        if is_teardown or args.resync:
+        if is_teardown or args.resync or args.resume:
             log.error("--id or BUILD_ID must be set for %s (needed to identify the ephemeral environment)",
-                       "resync" if args.resync else "teardown")
+                       "teardown" if is_teardown else "resume" if args.resume else "resync")
             sys.exit(1)
         env_id = uuid.uuid4().hex[:8]
         externally_set = False
@@ -156,8 +180,8 @@ def main():
     # For teardown, region is discovered from the ephemeral branch after checkout
     # (inside the orchestrator), so we pass a placeholder here.
     override_dir = args.override_dir or None
-    if is_teardown:
-        region = ""  # discovered from ephemeral branch in orchestrator.teardown()
+    if is_teardown or args.resume:
+        region = ""  # discovered from the existing ephemeral branch
     else:
         if override_dir and Path(override_dir).exists():
             env_config_dir = Path(override_dir)
@@ -191,20 +215,42 @@ def main():
     )
 
     try:
-        if args.resync:
+        if args.resume:
+            env.resume(
+                save_rc_state=args.save_regional_state,
+                save_mc_state=args.save_management_state,
+                resync_before_resume=args.resync_before_resume,
+            )
+            if args.save_regional_state:
+                region_file = Path(args.save_regional_state).parent / "region"
+                region_file.write_text(env.region)
+            log.info("")
+            log.info("==========================================")
+            log.info("Provisioning resume completed successfully!")
+            log.info("==========================================")
+        elif args.resync and not is_teardown:
             env.resync()
             log.info("")
             log.info("==========================================")
             log.info("Resync completed successfully!")
             log.info("==========================================")
         elif is_teardown:
-            env.teardown(fire_and_forget=args.teardown_fire_and_forget)
+            env.teardown(
+                fire_and_forget=args.teardown_fire_and_forget,
+                with_resync=args.resync,
+            )
             log.info("")
             log.info("==========================================")
-            log.info("Teardown completed successfully!")
+            if args.teardown_fire_and_forget:
+                log.info("MC and RC teardown were started asynchronously.")
+            else:
+                log.info("Teardown completed successfully!")
             log.info("==========================================")
         else:
-            env.provision(save_state=args.save_regional_state)
+            env.provision(
+                save_rc_state=args.save_regional_state,
+                save_mc_state=args.save_management_state,
+            )
             # Write discovered region to output dir so the Makefile can capture it
             if args.save_regional_state:
                 region_file = Path(args.save_regional_state).parent / "region"
@@ -219,8 +265,13 @@ def main():
             log.info("    ./ci/ephemeral-provider/main.py --teardown --id %s", env_id)
             log.info("")
     except Exception:
-        log.exception("Ephemeral environment %s failed",
-                       "resync" if args.resync else "teardown" if is_teardown else "provision")
+        operation = (
+            "teardown" if is_teardown else
+            "resume" if args.resume else
+            "resync" if args.resync else
+            "provision"
+        )
+        log.exception("Ephemeral environment %s failed", operation)
         sys.exit(1)
 
 

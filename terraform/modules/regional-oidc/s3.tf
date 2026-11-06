@@ -1,10 +1,10 @@
 resource "aws_s3_bucket" "oidc" {
   bucket        = local.bucket_name
-  force_destroy = false
+  force_destroy = var.force_destroy
 
-  tags = {
+  tags = merge(local.common_tags, {
     Name = local.bucket_name
-  }
+  })
 }
 
 resource "aws_s3_bucket_versioning" "oidc" {

@@ -184,7 +184,7 @@ resource "aws_eks_pod_identity_association" "hypershift_installer" {
 #
 # Grants the External Secrets Operator permission to read secrets from SSM
 # Parameter Store. ESO will sync these to cluster namespaces managed by
-# CLM/Maestro.
+# seaplane-operator/kube-applier.
 #
 # The operator runs in the external-secrets namespace and uses Pod Identity
 # for AWS authentication.
@@ -230,6 +230,24 @@ resource "aws_iam_role_policy" "external_secrets_operator" {
         "ssm:GetParametersByPath"
       ]
       Resource = "arn:aws:ssm:*:*:parameter/infra/*"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "external_secrets_operator_assume_oidc_key_reader" {
+  count = var.oidc_key_reader_role_arn != "" ? 1 : 0
+  name  = "${var.cluster_id}-assume-oidc-key-reader"
+  role  = aws_iam_role.external_secrets_operator.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ]
+      Resource = var.oidc_key_reader_role_arn
     }]
   })
 }

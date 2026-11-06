@@ -14,6 +14,11 @@ spec:
     metadata:
       labels:
         app: {{ .Values.platformApi.app.name }}
+      annotations:
+        checksum/authz-config: {{ include (print $.Template.BasePath "/authz-configmap.yaml") . | sha256sum }}
+        {{- if .Values.platformApi.rateLimit.enabled }}
+        checksum/rate-limits: {{ include (print $.Template.BasePath "/ratelimit-configmap.yaml") . | sha256sum }}
+        {{- end }}
     spec:
       serviceAccountName: {{ .Values.platformApi.serviceAccount.name }}
       topologySpreadConstraints:
@@ -37,13 +42,48 @@ spec:
             - serve
             - --log-level={{ .Values.platformApi.app.args.logLevel }}
             - --log-format={{ .Values.platformApi.app.args.logFormat }}
-            - --maestro-url={{ .Values.platformApi.app.args.maestroUrl }}
-            - --allowed-accounts={{ .Values.platformApi.app.args.allowedAccounts }}
             - --api-port={{ .Values.platformApi.app.args.apiPort }}
             - --health-port={{ .Values.platformApi.app.args.healthPort }}
             - --metrics-port={{ .Values.platformApi.app.args.metricsPort }}
-            - --dynamodb-region={{ .Values.platformApi.app.args.dynamodbRegion }}
-            - --dynamodb-prefix={{ .Values.platformApi.app.args.dynamodbPrefix }}
+            {{- if .Values.platformApi.app.args.oidcIssuerBaseURL }}
+            - --oidc-issuer-base-url={{ .Values.platformApi.app.args.oidcIssuerBaseURL }}
+            {{- end }}
+            {{- if .Values.platformApi.app.args.defaultClusterExpiration }}
+            - --default-cluster-expiration={{ .Values.platformApi.app.args.defaultClusterExpiration }}
+            {{- end }}
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.global.aws_region | quote }}
+            - name: AUTHZ_CONFIG_FILE
+              value: /etc/platform-api/authz/config.yaml
+            # The only account that may change the temporary account allowlist.
+            - name: AWS_ACCOUNT_ID
+              value: {{ .Values.global.aws_account_id | quote }}
+            # "id:account" pairs platform-api registers on startup.
+            - name: MANAGEMENT_CLUSTERS
+              value: {{ .Values.global.management_clusters | default "" | quote }}
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.platformApi.seaplanedb.secretName | default "seaplane-db-dsn" }}
+                  key: {{ .Values.platformApi.seaplanedb.secretKey | default "dsn" }}
+            {{- if .Values.platformApi.rateLimit.enabled }}
+            - name: RATE_LIMIT_ENABLED
+              value: "true"
+            - name: RATE_LIMIT_CONFIG_FILE
+              value: /etc/platform-api/rate-limits/limits.yaml
+            - name: REDIS_ENDPOINT
+              value: {{ .Values.platformApi.rateLimit.redisEndpoint | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: authz-config
+              mountPath: /etc/platform-api/authz
+              readOnly: true
+            {{- if .Values.platformApi.rateLimit.enabled }}
+            - name: rate-limits
+              mountPath: /etc/platform-api/rate-limits
+              readOnly: true
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.platformApi.app.args.apiPort }}
@@ -77,42 +117,13 @@ spec:
             limits:
               cpu: {{ .Values.platformApi.app.resources.limits.cpu }}
               memory: {{ .Values.platformApi.app.resources.limits.memory }}
-        - name: envoy
-          image: {{ .Values.platformApi.envoy.image.repository }}:{{ .Values.platformApi.envoy.image.tag }}
-          ports:
-            - containerPort: {{ .Values.platformApi.service.ports.http }}
-              name: http
-              protocol: TCP
-          volumeMounts:
-            - name: envoy-config
-              mountPath: /etc/envoy
-              readOnly: true
-          command:
-            - envoy
-            - -c
-            - /etc/envoy/envoy.yaml
-            - --log-level
-            - info
-          livenessProbe:
-            httpGet:
-              path: /v0/live
-              port: {{ .Values.platformApi.service.ports.http }}
-            initialDelaySeconds: {{ .Values.platformApi.probes.liveness.initialDelaySeconds }}
-            periodSeconds: {{ .Values.platformApi.probes.liveness.periodSeconds }}
-          readinessProbe:
-            httpGet:
-              path: /v0/live
-              port: {{ .Values.platformApi.service.ports.http }}
-            initialDelaySeconds: {{ .Values.platformApi.probes.readiness.initialDelaySeconds }}
-            periodSeconds: {{ .Values.platformApi.probes.readiness.periodSeconds }}
-          resources:
-            requests:
-              cpu: {{ .Values.platformApi.envoy.resources.requests.cpu }}
-              memory: {{ .Values.platformApi.envoy.resources.requests.memory }}
-            limits:
-              cpu: {{ .Values.platformApi.envoy.resources.limits.cpu }}
-              memory: {{ .Values.platformApi.envoy.resources.limits.memory }}
       volumes:
-        - name: envoy-config
+        - name: authz-config
           configMap:
-            name: envoy-config
+            name: authz-config
+            defaultMode: 0644
+        {{- if .Values.platformApi.rateLimit.enabled }}
+        - name: rate-limits
+          configMap:
+            name: rate-limits
+        {{- end }}

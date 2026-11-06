@@ -8,20 +8,20 @@ AWS Account Minting will leverage a collection of idempotent pipelines in order 
 
 ```yaml
 control:
-  rosa-regional-platform:
+  rosa-seaplane:
     prod: prod-us-east-1
       prod-eu-west-2
       ...
 
 staging-1:
-  rosa-regional-platform:
+  rosa-seaplane:
     int: int-us-east-2
     stage: stage-us-east-1
       stage-eu-west-2
       ...
 
 staging-2:
-  rosa-regional-platform:
+  rosa-seaplane:
     dev: dev-kirk-us-east-2
       dev-pete-eu-west-1
       ...
@@ -161,7 +161,7 @@ sequenceDiagram
 
 ### Performance
 
-- Care should be taken that any pipelines that can run in parallel during new-region creation can be. Our goal is to create a new region within an hour. For example, we can parallelize RC and MC cluster creation using a fan-out pattern, and then come back after those jobs are completed to register the MCs as consumers within the RC's Maestro instance.
+- Care should be taken that any pipelines that can run in parallel during new-region creation can be. Our goal is to create a new region within an hour. For example, we can parallelize RC and MC cluster creation using a fan-out pattern, and then come back after those jobs are completed to register the MCs with the seaplane-operator on the RC.
 
 ### Cost
 
