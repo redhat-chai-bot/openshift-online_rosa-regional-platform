@@ -203,7 +203,8 @@ pre-push: ## Run all CI validation checks (parallel)
 	@echo "Formatting Terraform files..."
 	@$(MAKE) terraform-fmt
 	@echo ""
-	@$(MAKE) -j4 check-docs check-rendered-files helm-lint terraform-validate promtool-test check-default-tags check-submodule-fetch-config check-e2e-pins
+	@$(MAKE) -j4 check-docs check-rendered-files helm-lint terraform-validate promtool-test check-default-tags check-submodule-fetch-config
+	@$(MAKE) check-e2e-pins
 	@echo ""
 	@echo "✅ All pre-push checks passed!"
 
